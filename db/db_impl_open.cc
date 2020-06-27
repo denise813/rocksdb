@@ -145,7 +145,7 @@ DBOptions SanitizeOptions(const std::string& dbname, const DBOptions& src) {
 }
 
 namespace {
-
+//参考DBImpl::Open
 Status SanitizeOptionsByTable(
     const DBOptions& db_opts,
     const std::vector<ColumnFamilyDescriptor>& column_families) {
@@ -159,6 +159,7 @@ Status SanitizeOptionsByTable(
   return Status::OK();
 }
 
+//DBImpl::Open
 static Status ValidateOptions(
     const DBOptions& db_options,
     const std::vector<ColumnFamilyDescriptor>& column_families) {
@@ -217,6 +218,7 @@ static Status ValidateOptions(
   return Status::OK();
 }
 }  // namespace
+//创建新DB
 Status DBImpl::NewDB() {
   VersionEdit new_db;
   new_db.SetLogNumber(0);
@@ -249,6 +251,7 @@ Status DBImpl::NewDB() {
   }
   if (s.ok()) {
     // Make "CURRENT" file that points to the new manifest file.
+    //如果成功，就把MANIFEST文件名写入到CURRENT文件中  
     s = SetCurrentFile(env_, dbname_, 1, directories_.GetDbDir());
   } else {
     env_->DeleteFile(manifest);
@@ -505,6 +508,8 @@ Status DBImpl::Recover(
 }
 
 // REQUIRES: log_numbers are sorted in ascending order
+//该函数打开指定的log文件，回放日志。期间可能会执行compaction，
+//生产新的level 0sstable文件，记录文件变动到edit中。
 Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
                                SequenceNumber* next_sequence, bool read_only) {
   struct LogReporter : public log::Reader::Reporter {
@@ -1066,6 +1071,7 @@ Status DBImpl::WriteLevel0TableForRecovery(int job_id, ColumnFamilyData* cfd,
   return s;
 }
 
+//dbname对接文件存放路径
 Status DB::Open(const Options& options, const std::string& dbname, DB** dbptr) {
   DBOptions db_options(options);
   ColumnFamilyOptions cf_options(options);
@@ -1092,6 +1098,7 @@ Status DB::Open(const DBOptions& db_options, const std::string& dbname,
                       !kSeqPerBatch, kBatchPerTxn);
 }
 
+//dbname也就是路径  DB::Open
 Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
                     const std::vector<ColumnFamilyDescriptor>& column_families,
                     std::vector<ColumnFamilyHandle*>* handles, DB** dbptr,
@@ -1115,7 +1122,13 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         std::max(max_write_buffer_size, cf.options.write_buffer_size);
   }
 
+/** comment by hy 2020-06-09
+ * # 异步代理
+ */
   DBImpl* impl = new DBImpl(db_options, dbname, seq_per_batch, batch_per_txn);
+/** comment by hy 2020-06-22
+ * # /创建目录 WAL 路径 判断
+ */
   s = impl->env_->CreateDirIfMissing(impl->immutable_db_options_.wal_dir);
   if (s.ok()) {
     std::vector<std::string> paths;
@@ -1128,6 +1141,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       }
     }
     for (auto& path : paths) {
+	  //std::cout << "yang test ..############.. :" << path;     yang test ..############.. :./test/rocksdb_simple_example
       s = impl->env_->CreateDirIfMissing(path);
       if (!s.ok()) {
         break;
@@ -1154,8 +1168,12 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   impl->mutex_.Lock();
   auto write_hint = impl->CalculateWALWriteHint();
   // Handles create_if_missing, error_if_exists
-  s = impl->Recover(column_families);
+  //锁定并试图做Recover操作。Recover操作用来处理创建flag，比如存在就返回失败等等，尝试从已存在的sstable文件恢复db
+  s = impl->Recover(column_families); //DBImpl::Recover
   if (s.ok()) {
+  	//如果Recover返回成功，则调用VersionSet取得新的log文件编号--实际上是在当前基础上+1，
+  	//准备新的log文件。如果log文件创建成功，则根据log文件创建log::Writer。然后执行
+  	//VersionSet::LogAndApply，根据edit记录的增量变动生成新的current version，并写入MANIFEST文件。
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     std::unique_ptr<WritableFile> lfile;
     EnvOptions soptions(db_options);
@@ -1165,9 +1183,15 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
                                      impl->mutable_db_options_));
     std::string log_fname =
         LogFileName(impl->immutable_db_options_.wal_dir, new_log_number);
+/** comment by hy 2020-06-09
+ * # 按内存WAL ,返回 WritableFile 这个 log_fname 就是 WAL了
+ */
     s = NewWritableFile(impl->immutable_db_options_.env, log_fname, &lfile,
                         opt_env_options);
     if (s.ok()) {
+/** comment by hy 2020-06-09
+ * # 预留一个
+ */
       lfile->SetWriteLifeTimeHint(write_hint);
       lfile->SetPreallocationBlockSize(
           impl->GetWalPreallocateBlockSize(max_write_buffer_size));
@@ -1178,6 +1202,9 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
         std::unique_ptr<WritableFileWriter> file_writer(
             new WritableFileWriter(std::move(lfile), log_fname, opt_env_options,
                                    impl->env_, nullptr /* stats */, listeners));
+/** comment by hy 2020-06-10
+ * # log 处理,将写者 LogWriterNumber
+ */
         impl->logs_.emplace_back(
             new_log_number,
             new log::Writer(
@@ -1228,6 +1255,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
       if (impl->two_write_queues_) {
         impl->log_write_mutex_.Unlock();
       }
+	  //删除过期文件
       impl->DeleteObsoleteFiles();
       s = impl->directories_.GetDbDir()->Fsync();
     }
@@ -1319,6 +1347,9 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   if (s.ok()) {
     ROCKS_LOG_HEADER(impl->immutable_db_options_.info_log, "DB pointer %p",
                      impl);
+/** comment by hy 2020-06-10
+ * # 持久化 opt
+ */
     LogFlush(impl->immutable_db_options_.info_log);
     assert(impl->TEST_WALBufferIsEmpty());
     // If the assert above fails then we need to FlushWAL before returning

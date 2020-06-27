@@ -122,6 +122,7 @@ CompressionType GetCompressionFlush(
   }
 }
 
+//MutableDBOptions::Dump   ImmutableDBOptions::Dump  DumpSupportInfo  ColumnFamilyOptions::Dump
 namespace {
 void DumpSupportInfo(Logger* logger) {
   ROCKS_LOG_HEADER(logger, "Compression algorithms supported:");
@@ -1050,6 +1051,7 @@ Status DBImpl::FlushWAL(bool sync) {
   return SyncWAL();
 }
 
+//真正的flush刷盘 DBImpl::SyncWAL
 Status DBImpl::SyncWAL() {
   autovector<log::Writer*, 1> logs_to_sync;
   bool need_log_dir_sync;
@@ -1131,6 +1133,7 @@ Status DBImpl::UnlockWAL() {
   return Status::OK();
 }
 
+//DBImpl::PipelinedWriteImpl
 void DBImpl::MarkLogsSynced(uint64_t up_to, bool synced_dir,
                             const Status& status) {
   mutex_.AssertHeld();
@@ -1152,7 +1155,7 @@ void DBImpl::MarkLogsSynced(uint64_t up_to, bool synced_dir,
   }
   assert(!status.ok() || logs_.empty() || logs_[0].number > up_to ||
          (logs_.size() == 1 && !logs_[0].getting_synced));
-  log_sync_cv_.SignalAll();
+  log_sync_cv_.SignalAll();  //真正的flush刷盘 DBImpl::SyncWAL
 }
 
 SequenceNumber DBImpl::GetLatestSequenceNumber() const {
@@ -1347,12 +1350,14 @@ ColumnFamilyHandle* DBImpl::DefaultColumnFamily() const {
   return default_cf_handle_;
 }
 
+//从DB中查询key 对应的value，参数@options指定读取操作的选项，典型的如snapshot号，从指定的快照中读取。
 Status DBImpl::Get(const ReadOptions& read_options,
                    ColumnFamilyHandle* column_family, const Slice& key,
                    PinnableSlice* value) {
   return GetImpl(read_options, column_family, key, value);
 }
 
+//DBImpl::Get
 Status DBImpl::GetImpl(const ReadOptions& read_options,
                        ColumnFamilyHandle* column_family, const Slice& key,
                        PinnableSlice* pinnable_val, bool* value_found,
@@ -1362,6 +1367,9 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
   StopWatch sw(env_, stats_, DB_GET);
   PERF_TIMER_GUARD(get_snapshot_time);
 
+/** comment by hy 2020-06-13
+ * # 获取column family里面的数据，包括memtable和immutable
+ */
   auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family);
   auto cfd = cfh->cfd();
 
@@ -1381,6 +1389,9 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
   TEST_SYNC_POINT("DBImpl::GetImpl:2");
 
   SequenceNumber snapshot;
+/** comment by hy 2020-06-13
+ * # snapshot 相关操作
+ */
   if (read_options.snapshot != nullptr) {
     // Note: In WritePrepared txns this is not necessary but not harmful
     // either.  Because prep_seq > snapshot => commit_seq > snapshot so if
@@ -1406,6 +1417,8 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
     // version because a flush happening in between may compact away data for
     // the snapshot, but the snapshot is earlier than the data overwriting it,
     // so users may see wrong results.
+    //每次调用Get的时候，RocksDB都会构造一个LookupKey,这里我们可以简单的认为这个seq就是
+    //当前的version最后一次写成功的seq(以后会介绍这里的publish_seq).
     snapshot = last_seq_same_as_publish_seq_
                    ? versions_->LastSequence()
                    : versions_->LastPublishedSequence();
@@ -1421,13 +1434,20 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
   // First look in the memtable, then in the immutable memtable (if any).
   // s is both in/out. When in, s could either be OK or MergeInProgress.
   // merge_operands will contain the sequence of merges in the latter case.
+  //每次调用Get的时候，RocksDB都会构造一个LookupKey,这里我们可以简单的认为这个seq就
+  //是当前的version最后一次写成功的seq(以后会介绍这里的publish_seq).
   LookupKey lkey(key, snapshot);
   PERF_TIMER_STOP(get_snapshot_time);
 
   bool skip_memtable = (read_options.read_tier == kPersistedTier &&
                         has_unpersisted_data_.load(std::memory_order_relaxed));
   bool done = false;
+  //调用MemTable::Get  memtable中查找 参考 http://mysql.taobao.org/monthly/2018/11/05
   if (!skip_memtable) {
+/** comment by hy 2020-06-13
+ * # 进入 memtable 中查找key
+     MemTable::Get
+ */
     if (sv->mem->Get(lkey, pinnable_val->GetSelf(), &s, &merge_context,
                      &max_covering_tombstone_seq, read_options, callback,
                      is_blob_index)) {
@@ -1438,6 +1458,10 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
                sv->imm->Get(lkey, pinnable_val->GetSelf(), &s, &merge_context,
                             &max_covering_tombstone_seq, read_options, callback,
                             is_blob_index)) {
+/** comment by hy 2020-06-13
+ * # 进入immutable中查找key
+     sv->imm->Get
+ */
       done = true;
       pinnable_val->PinSelf();
       RecordTick(stats_, MEMTABLE_HIT);
@@ -1447,8 +1471,16 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
       return s;
     }
   }
+
+  //memtable中没找到，则从sst文件查找. 参考http://mysql.taobao.org/monthly/2018/12/08/
   if (!done) {
     PERF_TIMER_GUARD(get_from_output_files_time);
+/** comment by hy 2020-06-13
+ * # 迭代SST文件查找
+     直接从当前的version(sv->current)调用Get方法
+	// 这个函数简单来说就是根据所需要查找的key,然后选择对应的文件,这里每次会返回一个文件(key在sst的key范围内),然后循环查找.
+	//Version::Get
+ */
     sv->current->Get(read_options, lkey, pinnable_val, &s, &merge_context,
                      &max_covering_tombstone_seq, value_found, nullptr, nullptr,
                      callback, is_blob_index);
@@ -1659,6 +1691,8 @@ std::vector<Status> DBImpl::MultiGet(
   return stat_list;
 }
 
+//创建CF，通过handle返回
+//CreateColumnFamily和DropColumnFamily对应
 Status DBImpl::CreateColumnFamily(const ColumnFamilyOptions& cf_options,
                                   const std::string& column_family,
                                   ColumnFamilyHandle** handle) {
@@ -1727,6 +1761,8 @@ Status DBImpl::CreateColumnFamilies(
   return s;
 }
 
+//首先就是通过调用GetNextColumnFamilyID来得到当前创建的ColumnFamily对应的ID(自增).
+//然后再调用LogAndApply来对ColumnFamily 进行对应的操作.最后再返回封装好的ColumnFamilyHandle给调用者.
 Status DBImpl::CreateColumnFamilyImpl(const ColumnFamilyOptions& cf_options,
                                       const std::string& column_family_name,
                                       ColumnFamilyHandle** handle) {
@@ -1761,6 +1797,9 @@ Status DBImpl::CreateColumnFamilyImpl(const ColumnFamilyOptions& cf_options,
         nullptr) {
       return Status::InvalidArgument("Column family already exists");
     }
+/** comment by hy 2020-06-10
+ * # 
+ */
     VersionEdit edit;
     edit.AddColumnFamily(column_family_name);
     uint32_t new_id = versions_->GetColumnFamilySet()->GetNextColumnFamilyID();
@@ -1775,6 +1814,10 @@ Status DBImpl::CreateColumnFamilyImpl(const ColumnFamilyOptions& cf_options,
       write_thread_.EnterUnbatched(&w, &mutex_);
       // LogAndApply will both write the creation in MANIFEST and create
       // ColumnFamilyData object
+/** comment by hy 2020-06-10
+ * # 处理 log, mains 文件等
+     最终会在LogAndApply->ProcessManifestWrites调用ColumnFamilySet的CreateColumnFamily函数(通过VersionSet::CreateColumnFamily)
+ */
       s = versions_->LogAndApply(nullptr, MutableCFOptions(cf_options), &edit,
                                  &mutex_, directories_.GetDbDir(), false,
                                  &cf_options);
@@ -1936,6 +1979,7 @@ bool DBImpl::KeyMayExist(const ReadOptions& read_options,
   return s.ok() || s.IsIncomplete();
 }
 
+//通过该函数生产了一个Iterator*对象，调用这就可以基于该对象遍历db内容了。
 Iterator* DBImpl::NewIterator(const ReadOptions& read_options,
                               ColumnFamilyHandle* column_family) {
   if (read_options.managed) {
@@ -1985,6 +2029,7 @@ Iterator* DBImpl::NewIterator(const ReadOptions& read_options,
   return result;
 }
 
+//DBImpl::NewIterator
 ArenaWrappedDBIter* DBImpl::NewIteratorImpl(const ReadOptions& read_options,
                                             ColumnFamilyData* cfd,
                                             SequenceNumber snapshot,

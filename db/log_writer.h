@@ -65,6 +65,12 @@ namespace log {
  * Log number = 32bit log file number, so that we can distinguish between
  * records written by the most recent log writer vs a previous one.
  */
+ /*
+ 所有的写操作都必须先成功的append到操作日志中，然后再更新内存memtable。这样做有两个有点：
+ 1可以将随机的写IO变成append，极大的提高写磁盘速度；
+ 2防止在节点down机导致内存数据丢失，造成数据丢失，这对系统来说是个灾难。
+ */
+//Log_reader.cc Reader 读日志相关  Log_writer.cc Writer 写日志相关
 class Writer {
  public:
   // Create a writer that will append data to "*dest".
@@ -87,6 +93,7 @@ class Writer {
   bool TEST_BufferIsEmpty();
 
  private:
+  //文件操作相关
   std::unique_ptr<WritableFileWriter> dest_;
   size_t block_offset_;       // Current offset in block
   uint64_t log_number_;
@@ -95,6 +102,7 @@ class Writer {
   // crc32c values for all supported record types.  These are
   // pre-computed to reduce the overhead of computing the crc of the
   // record type stored in the header.
+  //存放的为Record Type预先计算的CRC32值，因为Record Type是固定的几种，这样为了效率
   uint32_t type_crc_[kMaxRecordType + 1];
 
   Status EmitPhysicalRecord(RecordType type, const char* ptr, size_t length);

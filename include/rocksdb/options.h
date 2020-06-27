@@ -79,6 +79,8 @@ enum CompressionType : unsigned char {
 struct Options;
 struct DbPath;
 
+//struct Options : public DBOptions, public ColumnFamilyOptions {
+//ColumnFamilyDescriptor.options成员
 struct ColumnFamilyOptions : public AdvancedColumnFamilyOptions {
   // The function recovers options to a previous version. Only 4.6 or later
   // versions are supported.
@@ -340,6 +342,7 @@ struct DbPath {
   DbPath(const std::string& p, uint64_t t) : path(p), target_size(t) {}
 };
 
+//struct Options : public DBOptions, public ColumnFamilyOptions {}
 struct DBOptions {
   // The function recovers options to the option as in version 4.6.
   DBOptions* OldDefaults(int rocksdb_major_version = 4,
@@ -446,6 +449,8 @@ struct DBOptions {
   // Default: 0
   //
   // Dynamically changeable through SetDBOptions() API.
+  //当WAL文件的大小超过max_total_wal_size之后 最后一个条件的原因是，当WAL文件大小太大之后，
+  //我们需要清理WAL,因此此时我们需要将此WAL对应的数据都刷新到磁盘，也是刷新Memtable.
   uint64_t max_total_wal_size = 0;
 
   // If non-null, then we should collect metrics about database operations
@@ -517,6 +522,7 @@ struct DBOptions {
   // Default: 2
   //
   // Dynamically changeable through SetDBOptions() API.
+  //赋值见DBOptions::IncreaseParallelism
   int max_background_jobs = 2;
 
   // NOT SUPPORTED ANYMORE: RocksDB automatically decides this based on the
@@ -854,6 +860,9 @@ struct DBOptions {
   // write throughput and reduce latency of the prepare phase of two-phase
   // commit.
   //
+  //选项的目的就是将WAL和MemTable的写入pipeline化， 也就是说当一个线程写完毕WAL之后，
+  //此时在WAL的write队列中等待的其他的write则会开始继续写入WAL, 而当前线程将会继续 
+  //写入MemTable.此时就将不同的Writer的写入WAL和写入MemTable并发执行了.
   // Default: false
   bool enable_pipelined_write = false;
 
@@ -865,6 +874,8 @@ struct DBOptions {
   // if you are going to use this feature.
   //
   // Default: true
+  //在设置allow_concurrent_memtable_write时，由leader线程通知所有follower线程并发
+  //写入memtable；否则，由leader线程串行将所有follower线程的操作写入memtable中。
   bool allow_concurrent_memtable_write = true;
 
   // If true, threads synchronizing with the write batch group leader will
@@ -1193,6 +1204,7 @@ struct ReadOptions {
 };
 
 // Options that control write operations
+//rocksdb_writeoptions_t.rep成员
 struct WriteOptions {
   // If true, the write will be flushed from the operating system
   // buffer cache (by calling WritableFile::Sync()) before the write
@@ -1210,6 +1222,7 @@ struct WriteOptions {
   // system call followed by "fdatasync()".
   //
   // Default: false
+  //是否需要同步 写wal是否需要立刻flush
   bool sync;
 
   // If true, writes will not first go to the write ahead log,
@@ -1218,6 +1231,7 @@ struct WriteOptions {
   // you disable write-ahead logs, you must create backups with
   // flush_before_backup=true to avoid losing unflushed memtable data.
   // Default: false
+  //是否需要写事务日志
   bool disableWAL;
 
   // If true and if user is trying to write to column families that don't exist

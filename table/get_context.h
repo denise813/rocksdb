@@ -40,13 +40,16 @@ struct GetContextStats {
   uint64_t num_cache_compression_dict_bytes_insert = 0;
 };
 
+//GetContext结构，这个类只要是根据传递进来的文件元信息来查找对应的key.
+//FilePicker,这个类主要是根据传递进来的key来选择对应的文件
+//参考Version::Get
 class GetContext {
  public:
   enum GetState {
     kNotFound,
     kFound,
     kDeleted,
-    kCorrupt,
+    kCorrupt, // 数据损坏  
     kMerge,  // saver contains the current merge result (the operands)
     kBlobIndex,
   };

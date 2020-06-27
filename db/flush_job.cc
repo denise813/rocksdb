@@ -169,6 +169,9 @@ void FlushJob::PickMemTable() {
   assert(!pick_memtable_called);
   pick_memtable_called = true;
   // Save the contents of the earliest memtable as a new Table
+/** comment by hy 2020-06-18
+ * # 获取当前的memlist
+ */
   cfd_->imm()->PickMemtablesToFlush(max_memtable_id_, &mems_);
   if (mems_.empty()) {
     return;
@@ -180,6 +183,9 @@ void FlushJob::PickMemTable() {
   // time. We will use the first memtable's `edit` to keep the meta info for
   // this flush.
   MemTable* m = mems_[0];
+/** comment by hy 2020-06-18
+ * # 版本信息
+ */
   edit_ = m->GetEdits();
   edit_->SetPrevLogNumber(0);
   // SetLogNumber(log_num) indicates logs with number smaller than log_num
@@ -193,6 +199,12 @@ void FlushJob::PickMemTable() {
   base_ = cfd_->current();
   base_->Ref();  // it is likely that we do not need this reference
 }
+
+//在RocksDB中刷新是通过FlushJob这个类来实现的,整个实现还是比较简单.最终这里是调用WriteLevel0Table来刷新内容到磁盘。
+//格式参考https://github.com/facebook/rocksdb/wiki/Rocksdb-BlockBasedTable-Format
+
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
 
 Status FlushJob::Run(LogsWithPrepTracker* prep_tracker,
                      FileMetaData* file_meta) {
@@ -290,6 +302,9 @@ void FlushJob::Cancel() {
   base_->Unref();
 }
 
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
+
 Status FlushJob::WriteLevel0Table() {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_FLUSH_WRITE_L0);
@@ -367,6 +382,7 @@ Status FlushJob::WriteLevel0Table() {
       uint64_t oldest_key_time =
           mems_.front()->ApproximateOldestKeyTime();
 
+	  //调用BuildTable函数构造SSTable
       s = BuildTable(
           dbname_, db_options_.env, *cfd_->ioptions(), mutable_cf_options_,
           env_options_, cfd_->table_cache(), iter.get(),
@@ -407,6 +423,7 @@ Status FlushJob::WriteLevel0Table() {
     // threads could be concurrently producing compacted files for
     // that key range.
     // Add file to L0
+    //调用edit_->AddFile，将生成的文件添加到L0
     edit_->AddFile(0 /* level */, meta_.fd.GetNumber(), meta_.fd.GetPathId(),
                    meta_.fd.GetFileSize(), meta_.smallest, meta_.largest,
                    meta_.fd.smallest_seqno, meta_.fd.largest_seqno,

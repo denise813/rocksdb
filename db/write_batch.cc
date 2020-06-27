@@ -296,6 +296,10 @@ bool WriteBatch::HasRollback() const {
   return (ComputeContentFlags() & ContentFlags::HAS_ROLLBACK) != 0;
 }
 
+/*
+插入数据时：type（kTypeValue、kTypeDeletion），Key_size，Key，Value_size，Value
+删除数据时：type（kTypeValue、kTypeDeletion），Key_size，Key
+*/ //对KV record内容做检查
 Status ReadRecordFromWriteBatch(Slice* input, char* tag,
                                 uint32_t* column_family, Slice* key,
                                 Slice* value, Slice* blob, Slice* xid) {
@@ -396,6 +400,20 @@ Status ReadRecordFromWriteBatch(Slice* input, char* tag,
   return Status::OK();
 }
 
+/* 
+memtable insert堆栈信息:
+#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
+#2  rocksdb::MemTable::Add
+#3  rocksdb::MemTableInserter::PutCF
+#4  rocksdb::WriteBatch::Iterate
+#5  rocksdb::WriteBatch::Iterate
+#6  rocksdb::WriteBatchInternal::InsertInto
+#7  rocksdb::DBImpl::WriteImpl
+#8  rocksdb::DBImpl::Write 
+*/
+
+//写memtable的handler为MemTableInserter
 Status WriteBatch::Iterate(Handler* handler) const {
   Slice input(rep_);
   if (input.size() < WriteBatchInternal::kHeader) {
@@ -425,7 +443,10 @@ Status WriteBatch::Iterate(Handler* handler) const {
       last_was_try_again = false;
       tag = 0;
       column_family = 0;  // default
-
+/** comment by hy 2020-06-13
+ * # 从batch中读取数据
+     对KV record内容做检查
+ */
       s = ReadRecordFromWriteBatch(&input, &tag, &column_family, &key, &value,
                                    &blob, &xid);
       if (!s.ok()) {
@@ -442,12 +463,16 @@ Status WriteBatch::Iterate(Handler* handler) const {
       last_was_try_again = true;
       s = Status::OK();
     }
-
+/** comment by hy 2020-06-13
+ * # 根据操作类型进行不同的写入
+     handler = MemTableInserter
+ */
     switch (tag) {
       case kTypeColumnFamilyValue:
       case kTypeValue:
         assert(content_flags_.load(std::memory_order_relaxed) &
                (ContentFlags::DEFERRED | ContentFlags::HAS_PUT));
+		//MemTableInserter::PutCF
         s = handler->PutCF(column_family, key, value);
         if (LIKELY(s.ok())) {
           empty_batch = false;
@@ -607,6 +632,7 @@ int WriteBatchInternal::Count(const WriteBatch* b) {
   return DecodeFixed32(b->rep_.data() + 8);
 }
 
+//WriteBatchInternal::Put
 void WriteBatchInternal::SetCount(WriteBatch* b, int n) {
   EncodeFixed32(&b->rep_[8], n);
 }
@@ -623,6 +649,17 @@ size_t WriteBatchInternal::GetFirstOffset(WriteBatch* /*b*/) {
   return WriteBatchInternal::kHeader;
 }
 
+/*
+RocksDB的写入过程分成以下三步：
+1.将一条或者多条操作的记录封装到WriteBatch
+2.将记录对应的日志写到WAL文件中
+3.将WriteBatch中的一条或者多条记录写到内存中的memtable中
+
+  其中，每个WriteBatch代表一个事务，可以包含多条操作，可以通过调用WriteBatch::Put/Delete等操作
+将对应多条的key/value记录加入WriteBatch中。
+*/
+
+//WriteBatch::Put WriteBatch::Put   key-value填充到WriteBatch
 Status WriteBatchInternal::Put(WriteBatch* b, uint32_t column_family_id,
                                const Slice& key, const Slice& value) {
   if (key.size() > size_t{port::kMaxUint32}) {
@@ -634,6 +671,7 @@ Status WriteBatchInternal::Put(WriteBatch* b, uint32_t column_family_id,
 
   LocalSavePoint save(b);
   WriteBatchInternal::SetCount(b, WriteBatchInternal::Count(b) + 1);
+  //填充类型
   if (column_family_id == 0) {
     b->rep_.push_back(static_cast<char>(kTypeValue));
   } else {
@@ -648,6 +686,17 @@ Status WriteBatchInternal::Put(WriteBatch* b, uint32_t column_family_id,
   return save.commit();
 }
 
+/*
+RocksDB的写入过程分成以下三步：
+1.将一条或者多条操作的记录封装到WriteBatch
+2.将记录对应的日志写到WAL文件中
+3.将WriteBatch中的一条或者多条记录写到内存中的memtable中
+
+  其中，每个WriteBatch代表一个事务，可以包含多条操作，可以通过调用WriteBatch::Put/Delete等操作
+将对应多条的key/value记录加入WriteBatch中。
+参考https://cloud.tencent.com/developer/article/1143439
+*/
+//DB::Put
 Status WriteBatch::Put(ColumnFamilyHandle* column_family, const Slice& key,
                        const Slice& value) {
   return WriteBatchInternal::Put(this, GetColumnFamilyID(column_family), key,
@@ -760,6 +809,9 @@ Status WriteBatchInternal::MarkRollback(WriteBatch* b, const Slice& xid) {
 
 Status WriteBatchInternal::Delete(WriteBatch* b, uint32_t column_family_id,
                                   const Slice& key) {
+/** comment by hy 2020-06-13
+ * # 保存点
+ */
   LocalSavePoint save(b);
   WriteBatchInternal::SetCount(b, WriteBatchInternal::Count(b) + 1);
   if (column_family_id == 0) {
@@ -989,6 +1041,9 @@ Status WriteBatch::PutLogData(const Slice& blob) {
   return save.commit();
 }
 
+//事务的SetSavePoint和RollbackToSavePoint也是通过WriteBatch来实现的，SetSavePoint记录当前WriteBatch的大
+//小及统计信息，若干操作之后，若想回滚，则只需要将WriteBatch truncate到之前记录的大小并恢复统计信息即可。
+//TransactionBaseImpl::SetSavePoint
 void WriteBatch::SetSavePoint() {
   if (save_points_ == nullptr) {
     save_points_ = new SavePoints();
@@ -998,6 +1053,8 @@ void WriteBatch::SetSavePoint() {
       GetDataSize(), Count(), content_flags_.load(std::memory_order_relaxed)));
 }
 
+//事务的SetSavePoint和RollbackToSavePoint也是通过WriteBatch来实现的，SetSavePoint记录当前WriteBatch的大
+//小及统计信息，若干操作之后，若想回滚，则只需要将WriteBatch truncate到之前记录的大小并恢复统计信息即可。
 Status WriteBatch::RollbackToSavePoint() {
   if (save_points_ == nullptr || save_points_->stack.size() == 0) {
     return Status::NotFound();
@@ -1035,6 +1092,7 @@ Status WriteBatch::PopSavePoint() {
   return Status::OK();
 }
 
+//MemTableInserter，把KV record写入内存
 class MemTableInserter : public WriteBatch::Handler {
 
   SequenceNumber sequence_;
@@ -1218,6 +1276,7 @@ class MemTableInserter : public WriteBatch::Handler {
     return true;
   }
 
+  //WriteBatch::Iterate->PutCF
   Status PutCFImpl(uint32_t column_family_id, const Slice& key,
                    const Slice& value, ValueType value_type) {
     // optimize for non-recovery mode
@@ -1248,6 +1307,9 @@ class MemTableInserter : public WriteBatch::Handler {
     // any kind of transactions including the ones that use seq_per_batch
     assert(!seq_per_batch_ || !moptions->inplace_update_support);
     if (!moptions->inplace_update_support) {
+/** comment by hy 2020-06-13
+ * # 放入 memtable 数据
+ */
       bool mem_res =
           mem->Add(sequence_, value_type, key, value,
                    concurrent_memtable_writes_, get_post_process_info(mem));
@@ -1322,6 +1384,20 @@ class MemTableInserter : public WriteBatch::Handler {
     return ret_status;
   }
 
+  /* 
+  memtable insert堆栈信息:
+#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
+#2  rocksdb::MemTable::Add
+#3  rocksdb::MemTableInserter::PutCF
+#4  rocksdb::WriteBatch::Iterate
+#5  rocksdb::WriteBatch::Iterate
+#6  rocksdb::WriteBatchInternal::InsertInto
+#7  rocksdb::DBImpl::WriteImpl
+#8  rocksdb::DBImpl::Write 
+  */
+
+  //WriteBatch::Iterate
   Status PutCF(uint32_t column_family_id, const Slice& key,
                const Slice& value) override {
     return PutCFImpl(column_family_id, key, value, kTypeValue);
@@ -1586,6 +1662,16 @@ class MemTableInserter : public WriteBatch::Handler {
     return PutCFImpl(column_family_id, key, value, kTypeBlobIndex);
   }
 
+  /*
+checkmemtablefull会在下面三种条件下被调用
+
+delete操作
+put操作
+merge操作.
+  */
+
+  //这个函数主要用来将已经设置flush_state_为flush_requested的memtable的
+  //状态改变为flush_schedule(意思就是已经进入flush的调度队列),然后将这个columnfamily加入到对应的调度队列.
   void CheckMemtableFull() {
     if (flush_scheduler_ != nullptr) {
       auto* cfd = cf_mems_->current();
@@ -1751,6 +1837,18 @@ class MemTableInserter : public WriteBatch::Handler {
 // 2) During Write(), in a single-threaded write thread
 // 3) During Write(), in a concurrent context where memtables has been cloned
 // The reason is that it calls memtables->Seek(), which has a stateful cache
+/* 
+memtable insert堆栈信息:
+#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
+#2  rocksdb::MemTable::Add
+#3  rocksdb::MemTableInserter::PutCF
+#4  rocksdb::WriteBatch::Iterate
+#5  rocksdb::WriteBatch::Iterate
+#6  rocksdb::WriteBatchInternal::InsertInto
+#7  rocksdb::DBImpl::WriteImpl
+#8  rocksdb::DBImpl::Write 
+*/
 Status WriteBatchInternal::InsertInto(
     WriteThread::WriteGroup& write_group, SequenceNumber sequence,
     ColumnFamilyMemTables* memtables, FlushScheduler* flush_scheduler,
@@ -1760,7 +1858,7 @@ Status WriteBatchInternal::InsertInto(
       sequence, memtables, flush_scheduler, ignore_missing_column_families,
       recovery_log_number, db, concurrent_memtable_writes,
       nullptr /*has_valid_writes*/, seq_per_batch, batch_per_txn);
-  for (auto w : write_group) {
+  for (auto w : write_group) { //w对应为WriteThread::Writer
     if (w->CallbackFailed()) {
       continue;
     }
@@ -1772,6 +1870,7 @@ Status WriteBatchInternal::InsertInto(
     }
     SetSequence(w->batch, inserter.sequence());
     inserter.set_log_number_ref(w->log_ref);
+	//WriteBatch::Iterate   Iterate对应MemTableInserter，把recored记录写入内存
     w->status = w->batch->Iterate(&inserter);
     if (!w->status.ok()) {
       return w->status;
@@ -1782,6 +1881,17 @@ Status WriteBatchInternal::InsertInto(
   return Status::OK();
 }
 
+/*
+#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
+#2  rocksdb::MemTable::Add
+#3  rocksdb::MemTableInserter::PutCF
+#4  rocksdb::WriteBatch::Iterate
+#5  rocksdb::WriteBatch::Iterate
+#6  rocksdb::WriteBatchInternal::InsertInto
+#7  rocksdb::DBImpl::WriteImpl
+#8  rocksdb::DBImpl::Write 
+*/
 Status WriteBatchInternal::InsertInto(
     WriteThread::Writer* writer, SequenceNumber sequence,
     ColumnFamilyMemTables* memtables, FlushScheduler* flush_scheduler,
@@ -1798,6 +1908,7 @@ Status WriteBatchInternal::InsertInto(
       seq_per_batch, batch_per_txn);
   SetSequence(writer->batch, sequence);
   inserter.set_log_number_ref(writer->log_ref);
+  // rocksdb::WriteBatch::Iterate
   Status s = writer->batch->Iterate(&inserter);
   assert(!seq_per_batch || batch_cnt != 0);
   assert(!seq_per_batch || inserter.sequence() - sequence == batch_cnt);
@@ -1813,10 +1924,17 @@ Status WriteBatchInternal::InsertInto(
     uint64_t log_number, DB* db, bool concurrent_memtable_writes,
     SequenceNumber* next_seq, bool* has_valid_writes, bool seq_per_batch,
     bool batch_per_txn) {
+/** comment by hy 2020-06-13
+ * # 构造一个Memtable的Inserter
+ */
   MemTableInserter inserter(Sequence(batch), memtables, flush_scheduler,
                             ignore_missing_column_families, log_number, db,
                             concurrent_memtable_writes, has_valid_writes,
                             seq_per_batch, batch_per_txn);
+/** comment by hy 2020-06-13
+ * # 对Memtable进行写入操作
+     WriteBatch::Iterate
+ */
   Status s = batch->Iterate(&inserter);
   if (next_seq != nullptr) {
     *next_seq = inserter.sequence();

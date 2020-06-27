@@ -63,11 +63,15 @@ BlockBuilder::BlockBuilder(
     default:
       assert(0);
   }
+
+  //options->block_restart_interval表示当前重启点（其实也是一条记录）和上个重启点之间间隔了多少条记录。
+  //restarts_.push_back(0)，表示第一个重启点距离block data起始位置的偏移为0，也就是说第一条记录就是重启点。
   assert(block_restart_interval_ >= 1);
   restarts_.push_back(0);  // First restart point is at offset 0
   estimate_ = sizeof(uint32_t) + sizeof(uint32_t);
 }
 
+//// 重设内容，通常在Finish之后调用来构建新的block
 void BlockBuilder::Reset() {
   buffer_.clear();
   restarts_.clear();
@@ -109,8 +113,12 @@ size_t BlockBuilder::EstimateSizeAfterKV(const Slice& key,
   return estimate;
 }
 
+// 结束构建block，并返回指向block内容的指针
+//Finish只是在记录存储区后边添加了重启点信息，重启点信息没有进行压缩
+
 Slice BlockBuilder::Finish() {
   // Append restart array
+  // 添加重启点信息部分
   for (size_t i = 0; i < restarts_.size(); i++) {
     PutFixed32(&buffer_, restarts_[i]);
   }
@@ -132,14 +140,46 @@ Slice BlockBuilder::Finish() {
   return Slice(buffer_);
 }
 
+/* 一条记录的KV格式如下
+
+//例如last key="abcxxxxx"  key为"abcssss"，则"abc可以共用"， 
+//shared=3，key后面的"ssss"四个字符串就不能共用，non_shared=4
+
+// An entry for a particular key-value pair has the form:
+//     shared_bytes: varint32
+//     unshared_bytes: varint32
+//     value_length: varint32
+//     key_delta: char[unshared_bytes]
+//     value: char[value_length]
+// shared_bytes == 0 for restart points.
+//
+// The trailer of the block has the form:
+//     restarts: uint32[num_restarts]
+//     num_restarts: uint32
+// restarts[i] contains the offset within the block of the ith restart point.
+
+一个entry分为5部分内容：
+
+与前一条记录key共享部分的长度；
+与前一条记录key不共享部分的长度；
+value长度；
+与前一条记录key非共享的内容；
+value内容；
+
+*/
+
+//构建block data数据存入buffer_  调用Add函数向当前Block中新加入一个k/v对{key, value}。
 void BlockBuilder::Add(const Slice& key, const Slice& value,
                        const Slice* const delta_value) {
   assert(!finished_);
   assert(counter_ <= block_restart_interval_);
   assert(!use_value_delta_encoding_ || delta_value);
   size_t shared = 0;  // number of bytes shared with prev key
-  if (counter_ >= block_restart_interval_) {
+  if (counter_ >= block_restart_interval_) { //计数器counter < opions->block_restart_interval,需要添加新的重启点
     // Restart compression
+    
+	// 如果counter_=options_->block_restart_interval，说明这条记录就是重启点。
+	// 将这条记录距离block data首地址的偏移添加到restarts_中，并使counter_ = 0，
     restarts_.push_back(static_cast<uint32_t>(buffer_.size()));
     estimate_ += sizeof(uint32_t);
     counter_ = 0;
@@ -149,6 +189,8 @@ void BlockBuilder::Add(const Slice& key, const Slice& value,
       last_key_.assign(key.data(), key.size());
     }
   } else if (use_delta_encoding_) {
+    //如果和上一个key有相同的字符串，则可以复用，以此节省空间
+    //例如last key="abcxxxxx"  key为"abcssss"，则"abc可以共用"
     Slice last_key_piece(last_key_);
     // See how much sharing to do with previous string
     shared = key.difference_offset(last_key_piece);
@@ -158,10 +200,14 @@ void BlockBuilder::Add(const Slice& key, const Slice& value,
     // faster to just copy the whole thing.
     last_key_.assign(key.data(), key.size());
   }
-
-  const size_t non_shared = key.size() - shared;
+  
+  // key前缀之后的字符串长度  
+  //例如last key="abcxxxxx"  key为"abcssss"，则"abc可以共用"， 
+  //shared=3，key后面的"ssss"四个字符串就不能共用，non_shared=4
+  const size_t non_shared = key.size() - shared; 
   const size_t curr_size = buffer_.size();
 
+  //<shared><non_shared><value_size>填充
   if (use_value_delta_encoding_) {
     // Add "<shared><non_shared>" to buffer_
     PutVarint32Varint32(&buffer_, static_cast<uint32_t>(shared),
@@ -173,11 +219,13 @@ void BlockBuilder::Add(const Slice& key, const Slice& value,
                                 static_cast<uint32_t>(value.size()));
   }
 
+  // 填充key
   // Add string delta to buffer_ followed by value
   buffer_.append(key.data() + shared, non_shared);
   // Use value delta encoding only when the key has shared bytes. This would
   // simplify the decoding, where it can figure which decoding to use simply by
   // looking at the shared bytes size.
+  //填充value
   if (shared != 0 && use_value_delta_encoding_) {
     buffer_.append(delta_value->data(), delta_value->size());
   } else {
@@ -194,3 +242,4 @@ void BlockBuilder::Add(const Slice& key, const Slice& value,
 }
 
 }  // namespace rocksdb
+

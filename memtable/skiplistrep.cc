@@ -10,6 +10,8 @@
 
 namespace rocksdb {
 namespace {
+//SkipListFactory::CreateMemTableRep
+//memtable采用跳跃表的情况
 class SkipListRep : public MemTableRep {
   InlineSkipList<const MemTableRep::KeyComparator&> skip_list_;
   const MemTableRep::KeyComparator& cmp_;
@@ -38,6 +40,7 @@ public:
    skip_list_.Insert(static_cast<char*>(handle));
  }
 
+//MemTable::Add
  bool InsertKey(KeyHandle handle) override {
    return skip_list_.Insert(static_cast<char*>(handle));
  }
@@ -90,6 +93,7 @@ public:
 
   // Iteration over the contents of a skip list
   class Iterator : public MemTableRep::Iterator {
+    //定位SkipListRep::iterator::seek
     InlineSkipList<const MemTableRep::KeyComparator&>::Iterator iter_;
 
    public:
@@ -117,10 +121,12 @@ public:
     void Prev() override { iter_.Prev(); }
 
     // Advance to the first entry with a key >= target
+    //MemTableRep::Get
     void Seek(const Slice& user_key, const char* memtable_key) override {
       if (memtable_key != nullptr) {
         iter_.Seek(memtable_key);
       } else {
+      //InlineSkipList<>::Iterator::Seek
         iter_.Seek(EncodeKey(&tmp_, user_key));
       }
     }

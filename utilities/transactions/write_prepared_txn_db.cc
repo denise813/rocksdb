@@ -666,6 +666,9 @@ SnapshotImpl* WritePreparedTxnDB::GetSnapshotInternal(
       ReleaseSnapshot(snap_impl);
       // Wait for last visible seq to catch up with max, and also go beyond it
       // by one.
+/** comment by hy 2020-06-19
+ * # 
+ */
       AdvanceSeqByOne();
       snap_impl = db_impl_->GetSnapshotImpl(for_ww_conflict_check);
       assert(snap_impl);

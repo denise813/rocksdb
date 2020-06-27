@@ -78,6 +78,9 @@ class PosixLogger : public Logger {
       flush_pending_ = false;
       fflush(file_);
     }
+/** comment by hy 2020-06-18
+ * # 现在的时间搓
+ */
     last_flush_micros_ = env_->NowMicros();
   }
 

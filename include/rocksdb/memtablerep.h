@@ -53,6 +53,35 @@ typedef void* KeyHandle;
 
 extern Slice GetLengthPrefixedSlice(const char* data);
 
+/*
+Db_memtable_test.cc (db):class MockMemTableRep : public MemTableRep {
+Db_memtable_test.cc (db):class MockMemTableRepFactory : public MemTableRepFactory {
+Db_test_util.h (db):class SpecialMemTableRep : public MemTableRep {
+Db_test_util.h (db):class SpecialSkipListFactory : public MemTableRepFactory {
+Hash_linklist_rep.cc (memtable):class HashLinkListRep : public MemTableRep {
+Hash_linklist_rep.cc (memtable):  class FullListIterator : public MemTableRep::Iterator {
+Hash_linklist_rep.cc (memtable):  class LinkListIterator : public MemTableRep::Iterator {
+Hash_linklist_rep.cc (memtable):  class EmptyIterator : public MemTableRep::Iterator {
+Hash_linklist_rep.h (memtable):class HashLinkListRepFactory : public MemTableRepFactory {
+Hash_skiplist_rep.cc (memtable):class HashSkipListRep : public MemTableRep {
+Hash_skiplist_rep.cc (memtable):  class Iterator : public MemTableRep::Iterator {
+Hash_skiplist_rep.cc (memtable):  class EmptyIterator : public MemTableRep::Iterator {
+Hash_skiplist_rep.h (memtable):class HashSkipListRepFactory : public MemTableRepFactory {
+Memtable.h (db):  struct KeyComparator : public MemTableRep::KeyComparator {
+Memtablerep.h (include\rocksdb):class SkipListFactory : public MemTableRepFactory {
+Memtablerep.h (include\rocksdb):class VectorRepFactory : public MemTableRepFactory {
+Skiplistrep.cc (memtable):class SkipListRep : public MemTableRep {
+Skiplistrep.cc (memtable):  class Iterator : public MemTableRep::Iterator {
+Skiplistrep.cc (memtable):  class LookaheadIterator : public MemTableRep::Iterator {
+Vectorrep.cc (memtable):class VectorRep : public MemTableRep {
+Vectorrep.cc (memtable):  class Iterator : public MemTableRep::Iterator {
+
+和MemTableRepFactory等工程类关系可以参考
+http://mysql.taobao.org/monthly/2017/05/08/
+http://mysql.taobao.org/monthly/2018/08/08/
+*/
+//MemTableRep这个类用来抽象不同的MemTable的实现，也就是说它是一个虚类，然后不同的MemTable实现了它
+//SkipListRep等继承该类
 class MemTableRep {
  public:
   // KeyComparator provides a means to compare keys, which are internal keys
@@ -252,6 +281,7 @@ class MemTableRep {
 
 // This is the base class for all factories that are used by RocksDB to create
 // new MemTableRep objects
+//HashLinkListRepFactory HashSkipListRepFactory等继承该类
 class MemTableRepFactory {
  public:
   virtual ~MemTableRepFactory() {}
@@ -259,10 +289,14 @@ class MemTableRepFactory {
   virtual MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator&,
                                          Allocator*, const SliceTransform*,
                                          Logger* logger) = 0;
+  
   virtual MemTableRep* CreateMemTableRep(
       const MemTableRep::KeyComparator& key_cmp, Allocator* allocator,
       const SliceTransform* slice_transform, Logger* logger,
       uint32_t /* column_family_id */) {
+    //最后会调用对应的实现的CreateMemTableRep方法，这里我们就来看
+    //SkipList的实现．MemTableRep* SkipListFactory::CreateMemTableRep
+    //此外还有HashLinkList  HashSkipList等，参考对应的CreateMemTableRep
     return CreateMemTableRep(key_cmp, allocator, slice_transform, logger);
   }
 

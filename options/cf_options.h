@@ -38,7 +38,7 @@ struct ImmutableCFOptions {
   const CompactionFilter* compaction_filter;
 
   CompactionFilterFactory* compaction_filter_factory;
-
+  //表示最小的可以被flush的memtable的个数
   int min_write_buffer_number_to_merge;
 
   int max_write_buffer_number_to_maintain;
@@ -113,6 +113,8 @@ struct ImmutableCFOptions {
   // when specific RocksDB event happens.
   std::vector<std::shared_ptr<EventListener>> listeners;
 
+  //row cache就是对当前的所需要查找的key在当前sst中对应的value进行cache.
+  //参考TableCache::Get
   std::shared_ptr<Cache> row_cache;
 
   uint32_t max_subcompactions;
@@ -214,6 +216,7 @@ struct MutableCFOptions {
 
   // Memtable related options
   size_t write_buffer_size;
+  //最大的memtable的个数
   int max_write_buffer_number;
   size_t arena_block_size;
   double memtable_prefix_bloom_size_ratio;

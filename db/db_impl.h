@@ -75,6 +75,7 @@ struct JobContext;
 struct ExternalSstFileInfo;
 struct MemTableInfo;
 
+//DBImpl::Open中构造使用
 class DBImpl : public DB {
  public:
   DBImpl(const DBOptions& options, const std::string& dbname,
@@ -743,8 +744,10 @@ class DBImpl : public DB {
                        std::map<std::string, uint64_t>* stats_map);
 
  protected:
+  // 环境，封装了系统相关的文件操作、线程等等，其中线程通过env_->GetBackgroundThreads获取
   Env* const env_;
   const std::string dbname_;
+  // 多版本DB文件
   std::unique_ptr<VersionSet> versions_;
   // Flag to check whether we allocated and own the info log file
   bool own_info_log_;
@@ -1254,6 +1257,7 @@ class DBImpl : public DB {
   // * whenever disable_delete_obsolete_files_ goes to 0.
   // * whenever SetOptions successfully updates options.
   // * whenever a column family is dropped.
+  // 在background work结束时激发
   InstrumentedCondVar bg_cv_;
   // Writes are protected by locking both mutex_ and log_write_mutex_, and reads
   // must be under either mutex_ or log_write_mutex_. Since after ::Open,
@@ -1309,6 +1313,8 @@ class DBImpl : public DB {
   // reffered by back() without mutex_. With two_write_queues_, writes
   // are protected by locking both mutex_ and log_write_mutex_, and reads must
   // be under either mutex_ or log_write_mutex_.
+  //alive的wal文件，等对应的memtable flush到sstable文件后，会触发删除
+  //DBImpl::FindObsoleteFiles
   std::deque<LogFileNumberSize> alive_log_files_;
   // Log files that aren't fully synced, and the current log file.
   // Synchronization:
@@ -1323,8 +1329,11 @@ class DBImpl : public DB {
   //  the write_thread_ without using mutex
   //  - it follows that the items with getting_synced=true can be safely read
   //  from the same thread that has set getting_synced=true
+  //alive_log_files和logs_，他们的区别就是前一个表示有写入的WAL,而后一
+  //个则是包括了所有的WAL(比如open一个DB,而没有写入数据，此时也会生成WAL).
   std::deque<LogWriterNumber> logs_;
   // Signaled when getting_synced becomes false for some of the logs_.
+  //见DBImpl::MarkLogsSynced   //真正的flush刷盘 DBImpl::SyncWAL
   InstrumentedCondVar log_sync_cv_;
   // This is the app-level state that is written to the WAL but will be used
   // only during recovery. Using this feature enables not writing the state to
@@ -1377,7 +1386,14 @@ class DBImpl : public DB {
 
   WriteBufferManager* write_buffer_manager_;
 
+
+  //一个WriteThread::Writer代表一个写线程，和一个WriteBatch(代表这个线程要写的数据)关联，多个线程同时写，就会有多个线程同时走到该函数中，
+  //生成多个一个WriteThread::Writer,这多个WriteThread::Writer通过JoinBatchGroup组织成链表结构，参考DBImpl::WriteImpl
+  //所有线程公用一个全局的write_thread_,通过write_thread_关联起来
+
+  //参考DBImpl::WriteImpl
   WriteThread write_thread_;
+  //DBImpl::WriteToWAL->MergeBatch(把write_group下面的所有write对应的Writer::batch内容添加到新的tmp_batch)
   WriteBatch tmp_batch_;
   // The write thread when the writers have no memtable write. This will be used
   // in 2PC to batch the prepares separately from the serial commit.
@@ -1391,8 +1407,10 @@ class DBImpl : public DB {
   // sleep if it uses up the quota.
   // Note: This is to protect memtable and compaction. If the batch only writes
   // to the WAL its size need not to be included in this.
+  //获取该leader及其下面所有follower的Writer对应的WriteBatch数据总长度
   uint64_t last_batch_group_size_;
 
+  //是否有已经满掉的memtable需要刷新到磁盘
   FlushScheduler flush_scheduler_;
 
   SnapshotList snapshots_;
@@ -1406,6 +1424,7 @@ class DBImpl : public DB {
   // deleted from pending_outputs_, which allows PurgeObsoleteFiles() to clean
   // it up.
   // State is protected with db mutex.
+  // 待copact的文件列表，保护以防误删
   std::list<uint64_t> pending_outputs_;
 
   // PurgeFileInfo is a structure to hold information of files to be deleted in
@@ -1441,9 +1460,12 @@ class DBImpl : public DB {
   // in MaybeScheduleFlushOrCompaction()
   // invariant(column family present in flush_queue_ <==>
   // ColumnFamilyData::pending_flush_ == true)
+  //这个队列将会保存所有的将要被flush到磁盘的ColumnFamily.只有当当前的ColumnFamily满
+  //足flush条件（cfd->imm()->IsFlushPending()）才会将此CF加入到flush队列．
   std::deque<FlushRequest> flush_queue_;
   // invariant(column family present in compaction_queue_ <==>
   // ColumnFamilyData::pending_compaction_ == true)
+  //compaction队列 DBImpl::SchedulePendingCompaction
   std::deque<ColumnFamilyData*> compaction_queue_;
 
   // A queue to store filenames of the files to be purged
@@ -1456,6 +1478,7 @@ class DBImpl : public DB {
   // A queue to store log writers to close
   std::deque<log::Writer*> logs_to_free_queue_;
   int unscheduled_flushes_;
+  //表示需要被compact的columnfamily的队列长度.  DBImpl::SchedulePendingCompaction中自增
   int unscheduled_compactions_;
 
   // count how many background compactions are running or have been scheduled in

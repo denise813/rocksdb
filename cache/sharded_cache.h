@@ -19,6 +19,7 @@
 namespace rocksdb {
 
 // Single cache shard interface.
+//LRUCacheShard继承该类
 class CacheShard {
  public:
   CacheShard() = default;
@@ -45,6 +46,7 @@ class CacheShard {
 // Generic cache interface which shards cache by hash of keys. 2^num_shard_bits
 // shards will be created, with capacity split evenly to each of the shards.
 // Keys are sharded by the highest num_shard_bits bits of hash value.
+//LRUCache继承ShardedCache，ShardedCache继承Cache
 class ShardedCache : public Cache {
  public:
   ShardedCache(size_t capacity, int num_shard_bits, bool strict_capacity_limit,

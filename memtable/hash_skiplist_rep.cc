@@ -179,8 +179,15 @@ class HashSkipListRep : public MemTableRep {
 
     // Advance to the first entry with a key >= target
     void Seek(const Slice& k, const char* memtable_key) override {
+/** comment by hy 2020-06-14
+ * # 前缀格式
+ */
       auto transformed = memtable_rep_.transform_->Transform(ExtractUserKey(k));
       Reset(memtable_rep_.GetBucket(transformed));
+/** comment by hy 2020-06-14
+ * # 后续调用函数
+    PlainTableIterator::Seek
+ */
       HashSkipListRep::Iterator::Seek(k, memtable_key);
     }
 
@@ -264,6 +271,19 @@ HashSkipListRep::Bucket* HashSkipListRep::GetInitializedBucket(
   }
   return bucket;
 }
+
+/* 
+memtable insert堆栈信息:
+#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
+#2  rocksdb::MemTable::Add
+#3  rocksdb::MemTableInserter::PutCF
+#4  rocksdb::WriteBatch::Iterate
+#5  rocksdb::WriteBatch::Iterate
+#6  rocksdb::WriteBatchInternal::InsertInto
+#7  rocksdb::DBImpl::WriteImpl
+#8  rocksdb::DBImpl::Write 
+*/
 
 void HashSkipListRep::Insert(KeyHandle handle) {
   auto* key = static_cast<char*>(handle);

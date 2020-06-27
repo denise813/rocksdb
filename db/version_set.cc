@@ -105,6 +105,10 @@ Status OverlapWithIterator(const Comparator* ucmp,
 // levels. Therefore we are guaranteed that if we find data
 // in a smaller level, later levels are irrelevant (unless we
 // are MergeInProgress).
+//GetContext结构，这个类只要是根据传递进来的文件元信息来查找对应的key.
+//FilePicker,这个类主要是根据传递进来的key来选择对应的文件
+//FilePicker,这个类主要是根据传递进来的key来选择对应的文件
+//参考Version::Get
 class FilePicker {
  public:
   FilePicker(std::vector<FileMetaData*>* files, const Slice& user_key,
@@ -147,6 +151,11 @@ class FilePicker {
 
   int GetCurrentLevel() const { return curr_level_; }
 
+  //这个函数他会遍历所有的level,然后再遍历每个level的所有的文件,这里会对level 0的文
+  //件做一个特殊处理，这是因为只有level0的sst的range不是有序的，因此我们每次查找需
+  //要查找所有的文件，也就是会一个个的遍历.
+
+  //在非level0,我们只需要按照二分查找来得到对应的文件即可,如果二分查找不存在，那么我就需要进入下一个level进行查找.
   FdWithKeyRange* GetNextFile() {
     while (!search_ended_) {  // Loops over different levels.
       while (curr_index_in_curr_level_ < curr_file_level_->num_files) {
@@ -431,6 +440,7 @@ bool SomeFileOverlapsRange(
     const Slice* smallest_user_key,
     const Slice* largest_user_key) {
   const Comparator* ucmp = icmp.user_comparator();
+  //乱序、可能相交的文件集合，依次查找  
   if (!disjoint_sorted_files) {
     // Need to check against all files
     for (size_t i = 0; i < file_level.num_files; i++) {
@@ -439,12 +449,14 @@ bool SomeFileOverlapsRange(
           BeforeFile(ucmp, largest_user_key, f)) {
         // No overlap
       } else {
+        // 有重合  
         return true;  // Overlap
       }
     }
     return false;
   }
 
+  //有序&互不相交，直接二分查找
   // Binary search over file list
   uint32_t index = 0;
   if (smallest_user_key != nullptr) {
@@ -454,11 +466,12 @@ bool SomeFileOverlapsRange(
     index = FindFile(icmp, file_level, small.Encode());
   }
 
-  if (index >= file_level.num_files) {
+  if (index >= file_level.num_files) {// 不存在比smallest_user_key小的key  
     // beginning of range is after all files, so no overlap.
     return false;
   }
-
+  
+  //保证在largest_user_key之后	
   return !BeforeFile(ucmp, largest_user_key, &file_level.files[index]);
 }
 
@@ -993,12 +1006,16 @@ double VersionStorageInfo::GetEstimatedCompressionRatioAtLevel(
   return static_cast<double>(sum_data_size_bytes) / sum_file_size_bytes;
 }
 
+//函数最终在DB::NewIterators()接口中被调用，调用层次为：
+//	DBImpl::NewIterator()->DBImpl::NewInternalIterator()->Version::AddIterators()。
+//	函数功能是为该Version中的所有sstable都创建一个Two Level Iterator，以遍历sstable的内容。
 void Version::AddIterators(const ReadOptions& read_options,
                            const EnvOptions& soptions,
                            MergeIteratorBuilder* merge_iter_builder,
                            RangeDelAggregator* range_del_agg) {
   assert(storage_info_.finalized_);
 
+  //每级level轮询遍历
   for (int level = 0; level < storage_info_.num_non_empty_levels(); level++) {
     AddIteratorsForLevel(read_options, soptions, merge_iter_builder, level,
                          range_del_agg);
@@ -1022,6 +1039,7 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
   bool should_sample = should_sample_file_read();
 
   auto* arena = merge_iter_builder->GetArena();
+  //对于level=0级别的sstable文件，直接装入cache，level0的sstable文件可能有重合，需要merge。
   if (level == 0) {
     // Merge all level zero files together since they may overlap
     for (size_t i = 0; i < storage_info_.LevelFilesBrief(0).num_files; i++) {
@@ -1045,6 +1063,7 @@ void Version::AddIteratorsForLevel(const ReadOptions& read_options,
     // For levels > 0, we can use a concatenating iterator that sequentially
     // walks through the non-overlapping files in the level, opening them
     // lazily.
+    //对于level>0级别的sstable文件，lazy open机制，它们不会有重叠。
     auto* mem = arena->AllocateAligned(sizeof(LevelIterator));
     merge_iter_builder->AddIterator(new (mem) LevelIterator(
         cfd_->table_cache(), read_options, soptions,
@@ -1187,6 +1206,9 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
       mutable_cf_options_(mutable_cf_options),
       version_number_(version_number) {}
 
+// 这个函数简单来说就是根据所需要查找的key,然后选择对应的文件,这里每次会返回一个文件(key在sst的key范围内),然后循环查找.
+//查找函数，直接在DBImpl::Get()中被调用  sst中查找
+//memtable查找MemTable::Get  SST文件中查找Version::Get
 void Version::Get(const ReadOptions& read_options, const LookupKey& k,
                   PinnableSlice* value, Status* status,
                   MergeContext* merge_context,
@@ -1219,6 +1241,11 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
       storage_info_.files_, user_key, ikey, &storage_info_.level_files_brief_,
       storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
       user_comparator(), internal_comparator());
+  //这个函数他会遍历所有的level,然后再遍历每个level的所有的文件,这里会对level 0的
+  //文件做一个特殊处理，这是因为只有level0的sst的range不是有序的，因此我们每次查找
+  //需要查找所有的文件，也就是会一个个的遍历.
+
+  //在非level0,我们只需要按照二分查找来得到对应的文件即可,如果二分查找不存在，那么我就需要进入下一个level进行查找.
   FdWithKeyRange* f = fp.GetNextFile();
 
   while (f != nullptr) {
@@ -1235,6 +1262,8 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
         GetPerfLevel() >= PerfLevel::kEnableTimeExceptForMutex &&
         get_perf_context()->per_level_perf_context_enabled;
     StopWatchNano timer(env_, timer_enabled /* auto_start */);
+
+	//TableCache::Get,
     *status = table_cache_->Get(
         read_options, *internal_comparator(), *f->file_metadata, ikey,
         &get_context, mutable_cf_options_.prefix_extractor.get(),
@@ -1257,14 +1286,16 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
         db_statistics_ != nullptr) {
       get_context.ReportCounters();
     }
+
+	//table_cache_->Get返回之后，我们需要根据get_context来判断返回的结果
     switch (get_context.State()) {
-      case GetContext::kNotFound:
+      case GetContext::kNotFound: // 继续搜索下一个更早的sstable文件  
         // Keep searching in other files
         break;
       case GetContext::kMerge:
         // TODO: update per-level perfcontext user_key_return_count for kMerge
         break;
-      case GetContext::kFound:
+      case GetContext::kFound: // 找到 
         if (fp.GetHitFileLevel() == 0) {
           RecordTick(db_statistics_, GET_HIT_L0);
         } else if (fp.GetHitFileLevel() == 1) {
@@ -1274,11 +1305,12 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
         }
         PERF_COUNTER_BY_LEVEL_ADD(user_key_return_count, 1, fp.GetHitFileLevel());
         return;
-      case GetContext::kDeleted:
+      case GetContext::kDeleted: // 已删除  
         // Use empty error message for speed
+        // 为了效率，使用空的错误字符串  
         *status = Status::NotFound();
         return;
-      case GetContext::kCorrupt:
+      case GetContext::kCorrupt: // 数据损坏  
         *status = Status::Corruption("corrupted key for ", user_key);
         return;
       case GetContext::kBlobIndex:
@@ -1288,6 +1320,7 @@ void Version::Get(const ReadOptions& read_options, const LookupKey& k,
             "rocksdb::blob_db::BlobDB instead.");
         return;
     }
+	//如果没有发现对应的值则进入下一次文件查找
     f = fp.GetNextFile();
   }
 
@@ -1395,6 +1428,13 @@ void VersionStorageInfo::RemoveCurrentStats(FileMetaData* file_meta) {
   }
 }
 
+/*
+当Get操作直接搜寻memtable没有命中时，就需要调用Version::Get()函数从磁盘load数据文件并查找。
+ 如果此次Get不止seek了一个文件，就记录第一个文件到stat并返回。其后leveldb就会调用UpdateStats(stat)。
+Stat表明在指定key range查找key时，都要先seek此文件，才能在后续的sstable文件中找到key。
+该函数是将stat记录的sstable文件的allowed_seeks减1，减到0就执行compaction。也就是说如果文件被seek
+ 的次数超过了限制，表明读取效率已经很低，需要执行compaction了。所以说allowed_seeks是对compaction流程的有一个优化。
+*/
 void Version::UpdateAccumulatedStats(bool update_stats) {
   if (update_stats) {
     // maximum number of table properties loaded from files.
@@ -1607,6 +1647,13 @@ uint32_t GetExpiredTtlFilesCount(const ImmutableCFOptions& ioptions,
 }
 }  // anonymous namespace
 
+//计算compaction_score_
+//这个函数中会对level-0和其他的level区别处理。 首先来看level-0的处理:
+// 1.首先会计算level-0下所有文件的大小(total_size)以及文件个数(num_sorted_runs).
+// 2. 用文件个数除以level0_file_num_compaction_trigger来得到对应的score
+// 3. 如果当前不止一层level,那么将会从上面的score和(total_size/max_bytes_for_level_base)取最大值.
+//  之所以要做第三步，主要还是为了防止level-0的文件size过大，那么当它需要compact的时候有可能会
+//  需要和level-1 compact,那么此时就有可能会有一个很大的compact.
 void VersionStorageInfo::ComputeCompactionScore(
     const ImmutableCFOptions& immutable_cf_options,
     const MutableCFOptions& mutable_cf_options) {
@@ -1673,6 +1720,7 @@ void VersionStorageInfo::ComputeCompactionScore(
       }
     } else {
       // Compute the ratio of current size to size limit.
+      //然后是非level-0的处理,这里也是计算level的文件大小然后再除以MaxBytesForLevel，然后得到当前level的score.
       uint64_t level_bytes_no_compacting = 0;
       for (auto f : files_[level]) {
         if (!f->being_compacted) {
@@ -1680,7 +1728,7 @@ void VersionStorageInfo::ComputeCompactionScore(
         }
       }
       score = static_cast<double>(level_bytes_no_compacting) /
-              MaxBytesForLevel(level);
+              MaxBytesForLevel(level); //VersionStorageInfo::MaxBytesForLevel
     }
     compaction_level_[level] = level;
     compaction_score_[level] = score;
@@ -2057,6 +2105,11 @@ bool Version::Unref() {
   return false;
 }
 
+// 如果指定level中的某些文件和[*smallest_user_key,*largest_user_key]有重合就返回true。
+// @smallest_user_key==NULL表示比DB中所有key都小的key.  
+// @largest_user_key==NULL表示比DB中所有key都大的key.  
+
+//检查是否和指定level的文件有重合
 bool VersionStorageInfo::OverlapInLevel(int level,
                                         const Slice* smallest_user_key,
                                         const Slice* largest_user_key) {
@@ -2073,6 +2126,8 @@ bool VersionStorageInfo::OverlapInLevel(int level,
 // If hint_index is specified, then it points to a file in the
 // overlapping range.
 // The file_index returns a pointer to any file in an overlapping range.
+
+//它在指定level中找出和[begin, end]有重合的sstable文件
 void VersionStorageInfo::GetOverlappingInputs(
     int level, const InternalKey* begin, const InternalKey* end,
     std::vector<FileMetaData*>* inputs, int hint_index, int* file_index,
@@ -2398,12 +2453,14 @@ void VersionStorageInfo::ExtendFileRangeWithinInterval(
   *end_index = right;
 }
 
+// 返回指定level中所有sstable文件大小的和  
 uint64_t VersionStorageInfo::NumLevelBytes(int level) const {
   assert(level >= 0);
   assert(level < num_levels());
   return TotalFileSize(files_[level]);
 }
 
+//返回一个可读的单行信息--每个level的文件数，保存在*scratch中  
 const char* VersionStorageInfo::LevelSummary(
     LevelSummaryStorage* scratch) const {
   int len = 0;
@@ -2463,6 +2520,8 @@ const char* VersionStorageInfo::LevelFileSummary(FileSummaryStorage* scratch,
   return scratch->buffer;
 }
 
+// 对于所有level>0，遍历文件，找到和下一层文件的重叠数据的最大值(in bytes)  
+// 这个就是Version::GetOverlappingInputs()函数的简单应用  
 int64_t VersionStorageInfo::MaxNextLevelOverlappingBytes() {
   uint64_t result = 0;
   std::vector<FileMetaData*> overlaps;
@@ -2478,6 +2537,7 @@ int64_t VersionStorageInfo::MaxNextLevelOverlappingBytes() {
   return result;
 }
 
+//得到当前level的最大的文件大小.而这个函数实现也很简单.
 uint64_t VersionStorageInfo::MaxBytesForLevel(int level) const {
   // Note: the result for level zero is not really used since we set
   // the level-0 compaction threshold based on number of files.
@@ -2504,23 +2564,31 @@ void VersionStorageInfo::CalculateBaseBytes(const ImmutableCFOptions& ioptions,
   set_l0_delay_trigger_count(num_l0_count);
 
   level_max_bytes_.resize(ioptions.num_levels);
+
+  //level_compaction_dynamic_level_bytes,这个配置如果被设置，那么level_max_bytes将会这样 设置(这里我们只关注level):
+  // 如果是level-1那么level-1的的文件大小限制为options.max_bytes_for_level_base.
+  // 如果level大于1那么当前level-i的大小限制为(其中max_bytes这两个变量都是options中设置的)
   if (!ioptions.level_compaction_dynamic_level_bytes) {
     base_level_ = (ioptions.compaction_style == kCompactionStyleLevel) ? 1 : -1;
 
     // Calculate for static bytes base case
+    //确定各level层的level_max_bytes_
+    //举个例子,如果max_bytes_for_level_base=1024,max_bytes_for_level_multiplier=10,
+    //然后max_bytes_for_level_multiplier_additional未设置，那么L1, L2,L3的大小限制分别为1024,10240,102400.
     for (int i = 0; i < ioptions.num_levels; ++i) {
       if (i == 0 && ioptions.compaction_style == kCompactionStyleUniversal) {
         level_max_bytes_[i] = options.max_bytes_for_level_base;
-      } else if (i > 1) {
+      } else if (i > 1) { //如果level大于1那么当前level-i的大小限制为(其中max_bytes这两个变量都是options中设置的)
+      //Target_Size(Ln+1) = Target_Size(Ln) * max_bytes_for_level_multiplier * max_bytes_for_level_multiplier_additional[n].
         level_max_bytes_[i] = MultiplyCheckOverflow(
             MultiplyCheckOverflow(level_max_bytes_[i - 1],
                                   options.max_bytes_for_level_multiplier),
             options.MaxBytesMultiplerAdditional(i - 1));
-      } else {
+      } else { //如果是level=1那么level-=1的的文件大小限制为options.max_bytes_for_level_base.
         level_max_bytes_[i] = options.max_bytes_for_level_base;
       }
     }
-  } else {
+  } else { //如果level_compaction_dynamic_level_bytes没有被设置
     uint64_t max_level_size = 0;
 
     int first_non_empty_level = -1;
@@ -2753,6 +2821,7 @@ struct VersionSet::ManifestWriter {
   InstrumentedCondVar cv;
   ColumnFamilyData* cfd;
   const MutableCFOptions mutable_cf_options;
+  //这个数组就是即将要写入到manifest-log文件( MANIFEST-000001)中的内容.
   const autovector<VersionEdit*>& edit_list;
 
   explicit ManifestWriter(InstrumentedMutex* mu, ColumnFamilyData* _cfd,
@@ -2765,6 +2834,7 @@ struct VersionSet::ManifestWriter {
         edit_list(e) {}
 };
 
+//DBImpl::DBImpl中使用
 VersionSet::VersionSet(const std::string& dbname,
                        const ImmutableDBOptions* _db_options,
                        const EnvOptions& storage_options, Cache* table_cache,
@@ -2809,6 +2879,7 @@ VersionSet::~VersionSet() {
   obsolete_files_.clear();
 }
 
+//把v加入到versionset中，并设置为current version。并对老的current version执行Uref()。
 void VersionSet::AppendVersion(ColumnFamilyData* column_family_data,
                                Version* v) {
   // compute new compaction score
@@ -2837,6 +2908,7 @@ void VersionSet::AppendVersion(ColumnFamilyData* column_family_data,
   v->next_->prev_ = v;
 }
 
+//保存对应的数据到batch_edits中(manifest_writers_).
 Status VersionSet::ProcessManifestWrites(
     std::deque<ManifestWriter>& writers, InstrumentedMutex* mu,
     Directory* db_directory, bool new_descriptor_log,
@@ -2988,6 +3060,8 @@ Status VersionSet::ProcessManifestWrites(
   uint64_t new_manifest_file_size = 0;
   Status s;
 
+  //创建新的manifest-log(MANIFEST-000005)文件的逻辑.这里可以看到要么是第一次进入，
+  //要么文件大小大于option对应的值才会创建新的文件
   assert(pending_manifest_file_number_ == 0);
   if (!descriptor_log_ ||
       manifest_file_size_ > db_options_->max_manifest_file_size) {
@@ -2999,6 +3073,7 @@ Status VersionSet::ProcessManifestWrites(
     pending_manifest_file_number_ = manifest_file_number_;
   }
 
+  //如果需要创建新的manifest-log(MANIFEST-000005)文件，则开始构造对应的文件信息并创建文件.
   if (new_descriptor_log) {
     // if we are writing out new snapshot make sure to persist max column
     // family.
@@ -3063,6 +3138,9 @@ Status VersionSet::ProcessManifestWrites(
 #ifndef NDEBUG
       size_t idx = 0;
 #endif
+ 	  //开始写入对应的VersionEdit的record到文件(最后我们会来看这个record的构成),这里
+ 	  //看到写入完成后会调用Sync来刷新内容到磁盘,等这些操作都做完之后，则会更新Current
+ 	  //文件也就是更新最新的manifest-log(MANIFEST-000005)文件名到CURRENT文件中.
       for (auto& e : batch_edits) {
         std::string record;
         if (!e->EncodeTo(&record)) {
@@ -3121,6 +3199,7 @@ Status VersionSet::ProcessManifestWrites(
 
   // Append the old manifest file to the obsolete_manifest_ list to be deleted
   // by PurgeObsoleteFiles later.
+  //CURRENT文件更新完毕之后，就可以删除老的mainfest文件了.
   if (s.ok() && new_descriptor_log) {
     obsolete_manifests_.emplace_back(
         DescriptorFileName("", manifest_file_number_));
@@ -3203,6 +3282,7 @@ Status VersionSet::ProcessManifestWrites(
   pending_manifest_file_number_ = 0;
 
   // wake up all the waiting writers
+  //最后则是更新manifest_writers_队列，唤醒之前阻塞的内容.
   while (true) {
     ManifestWriter* ready = manifest_writers_.front();
     manifest_writers_.pop_front();
@@ -3230,6 +3310,7 @@ Status VersionSet::ProcessManifestWrites(
 
 // 'datas' is gramatically incorrect. We still use this notation to indicate
 // that this variable represents a collection of column_family_data.
+//创建MANIFEST-000005文件 
 Status VersionSet::LogAndApply(
     const autovector<ColumnFamilyData*>& column_family_datas,
     const autovector<const MutableCFOptions*>& mutable_cf_options_list,
@@ -3264,9 +3345,13 @@ Status VersionSet::LogAndApply(
     assert(static_cast<size_t>(num_cfds) == mutable_cf_options_list.size());
     assert(static_cast<size_t>(num_cfds) == edit_lists.size());
   }
+
+  //每次LogAndApply的时候都会创建一个新的ManifesWriter加入到manifest_writers_队列中.
+  //这里只有当之前保存在队列中 的所有Writer都写入完毕之后才会加入到队列，否则就会等待.
   for (int i = 0; i < num_cfds; ++i) {
     writers.emplace_back(mu, column_family_datas[i],
                          *mutable_cf_options_list[i], edit_lists[i]);
+	//VersionSet::ProcessManifestWrites中唤醒
     manifest_writers_.push_back(&writers[i]);
   }
   assert(!writers.empty());
@@ -3520,6 +3605,8 @@ Status VersionSet::GetCurrentManifestPath(std::string* manifest_path) {
   return Status::OK();
 }
 
+//恢复函数，从磁盘恢复最后保存的元信息
+//Recover就是根据CURRENT指定的MANIFEST，读取db元信息到this VersionSet对象的第二组成员中（db元信息）
 Status VersionSet::Recover(
     const std::vector<ColumnFamilyDescriptor>& column_families,
     bool read_only) {
@@ -3533,6 +3620,7 @@ Status VersionSet::Recover(
   std::unordered_map<int, std::string> column_families_not_found;
 
   // Read "CURRENT" file, which contains a pointer to the current manifest file
+  //读取CURRENT文件，获得最新的MANIFEST文件名，根据文件名打开MANIFEST文件。CURRENT文件以\n结尾，读取后需要trim下。
   std::string manifest_path;
   Status s = GetCurrentManifestPath(&manifest_path);
   if (!s.ok()) {
@@ -3598,6 +3686,9 @@ Status VersionSet::Recover(
     std::string scratch;
     std::vector<VersionEdit> replay_buffer;
     size_t num_entries_decoded = 0;
+	//读取MANIFEST内容，MANIFEST是以log的方式写入的，因此这里调用的是log::Reader来读取。
+	//然后调用VersionEdit::DecodeFrom，从内容解析出VersionEdit对象，并将VersionEdit记录
+	//的改动应用到versionset中。读取MANIFEST中的log number, prev log number, nextfile number, last sequence。
     while (reader.ReadRecord(&record, &scratch) && s.ok()) {
       VersionEdit edit;
       s = edit.DecodeFrom(record);
@@ -3624,6 +3715,8 @@ Status VersionSet::Recover(
           TEST_SYNC_POINT_CALLBACK("VersionSet::Recover:LastInAtomicGroup",
                                    &edit);
           for (auto& e : replay_buffer) {
+		  	//将磁盘上读取的ColumnFamily的信息初始化(初始化ColumnFamilySet结构)
+		  	//可以参考http://mysql.taobao.org/monthly/2018/06/09/
             s = ApplyOneVersionEditToBuilder(
                 e, cf_name_to_options, column_families_not_found, builders,
                 &have_log_number, &log_number, &have_prev_log_number,
@@ -3675,6 +3768,7 @@ Status VersionSet::Recover(
 
     // When reading DB generated using old release, min_log_number_to_keep=0.
     // All log files will be scanned for potential prepare entries.
+    //将读取到的log number, prev log number标记为已使用
     MarkMinLogNumberToKeep2PC(min_log_number_to_keep);
     MarkFileNumberUsed(previous_log_number);
     MarkFileNumberUsed(log_number);
@@ -3705,7 +3799,7 @@ Status VersionSet::Recover(
     }
   }
 
-  if (s.ok()) {
+  if (s.ok()) { //如果一切顺利就创建新的Version，并应用读取的几个number。
     for (auto cfd : *column_family_set_) {
       if (cfd->IsDropped()) {
         continue;
@@ -4131,6 +4225,7 @@ Status VersionSet::DumpManifest(Options& options, std::string& dscname,
 }
 #endif  // ROCKSDB_LITE
 
+//标记指定的文件编号已经被使用了
 void VersionSet::MarkFileNumberUsed(uint64_t number) {
   // only called during recovery and repair which are single threaded, so this
   // works because there can't be concurrent calls
@@ -4147,6 +4242,7 @@ void VersionSet::MarkMinLogNumberToKeep2PC(uint64_t number) {
   }
 }
 
+//把current version保存到*log中，信息包括comparator名字、compaction点和各级sstable文件，
 Status VersionSet::WriteSnapshot(log::Writer* log) {
   // TODO: Break up into multiple records to reduce memory usage on recovery?
 
@@ -4323,6 +4419,7 @@ uint64_t VersionSet::ApproximateSize(Version* v, const FdWithKeyRange& f,
   return result;
 }
 
+// 获取函数，把所有version的所有level的文件加入到@live中  
 void VersionSet::AddLiveFiles(std::vector<FileDescriptor>* live_list) {
   // pre-calculate space requirement
   int64_t total_files = 0;
@@ -4547,7 +4644,7 @@ void VersionSet::GetObsoleteFiles(std::vector<ObsoleteFileInfo>* files,
   obsolete_files_.swap(pending_files);
 }
 
-ColumnFamilyData* VersionSet::CreateColumnFamily(
+ColumnFamilyData* VersionSet::CreateColumnFamily( 
     const ColumnFamilyOptions& cf_options, VersionEdit* edit) {
   assert(edit->is_column_family_add_);
 
@@ -4557,6 +4654,7 @@ ColumnFamilyData* VersionSet::CreateColumnFamily(
   // Ref() dummy version once so that later we can call Unref() to delete it
   // by avoiding calling "delete" explicitly (~Version is private)
   dummy_versions->Ref();
+  //ColumnFamilySet::CreateColumnFamily
   auto new_cfd = column_family_set_->CreateColumnFamily(
       edit->column_family_name_, edit->column_family_, dummy_versions,
       cf_options);

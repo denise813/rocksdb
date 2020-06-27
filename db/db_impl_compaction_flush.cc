@@ -106,12 +106,18 @@ Status DBImpl::SyncClosedLogs(JobContext* job_context) {
       ROCKS_LOG_INFO(immutable_db_options_.info_log,
                      "[JOB %d] Syncing log #%" PRIu64, job_context->job_id,
                      log->get_log_number());
+/** comment by hy 2020-06-18
+ * # sync table 文件
+ */
       s = log->file()->Sync(immutable_db_options_.use_fsync);
       if (!s.ok()) {
         break;
       }
     }
     if (s.ok()) {
+/** comment by hy 2020-06-18
+ * # WAL 文件 sunc
+ */
       s = directories_.GetWalDir()->Fsync();
     }
 
@@ -129,6 +135,12 @@ Status DBImpl::SyncClosedLogs(JobContext* job_context) {
   return s;
 }
 
+//FlushMemTableToOutputFile来刷新Memtable到磁盘
+
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
+
+//DBImpl::FlushMemTablesToOutputFiles
 Status DBImpl::FlushMemTableToOutputFile(
     ColumnFamilyData* cfd, const MutableCFOptions& mutable_cf_options,
     bool* made_progress, JobContext* job_context,
@@ -154,6 +166,10 @@ Status DBImpl::FlushMemTableToOutputFile(
   FileMetaData file_meta;
 
   TEST_SYNC_POINT("DBImpl::FlushMemTableToOutputFile:BeforePickMemtables");
+/** comment by hy 2020-06-18
+ * # 选择 当前版本对应的 memtable list
+     FlushJob::PickMemTable
+ */
   flush_job.PickMemTable();
   TEST_SYNC_POINT("DBImpl::FlushMemTableToOutputFile:AfterPickMemtables");
 
@@ -172,6 +188,9 @@ Status DBImpl::FlushMemTableToOutputFile(
     // flushed SST may contain data from write batches whose updates to
     // other column families are missing.
     // SyncClosedLogs() may unlock and re-lock the db_mutex.
+/** comment by hy 2020-06-18
+ * # 
+ */
     s = SyncClosedLogs(job_context);
   } else {
     TEST_SYNC_POINT("DBImpl::SyncClosedLogs:Skip");
@@ -184,6 +203,9 @@ Status DBImpl::FlushMemTableToOutputFile(
   // and EventListener callback will be called when the db_mutex
   // is unlocked by the current thread.
   if (s.ok()) {
+/** comment by hy 2020-06-18
+ * # 
+ */
     s = flush_job.Run(&logs_with_prep_tracker_, &file_meta);
   } else {
     flush_job.Cancel();
@@ -231,9 +253,15 @@ Status DBImpl::FlushMemTableToOutputFile(
   return s;
 }
 
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
+//DBImpl::BackgroundFlush
 Status DBImpl::FlushMemTablesToOutputFiles(
     const autovector<BGFlushArg>& bg_flush_args, bool* made_progress,
     JobContext* job_context, LogBuffer* log_buffer, Env::Priority thread_pri) {
+/** comment by hy 2020-06-18
+ * # FLUSH 操作
+ */
   if (immutable_db_options_.atomic_flush) {
     return AtomicFlushMemTablesToOutputFiles(
         bg_flush_args, made_progress, job_context, log_buffer, thread_pri);
@@ -241,6 +269,9 @@ Status DBImpl::FlushMemTablesToOutputFiles(
   std::vector<SequenceNumber> snapshot_seqs;
   SequenceNumber earliest_write_conflict_snapshot;
   SnapshotChecker* snapshot_checker;
+/** comment by hy 2020-06-18
+ * # 快照版本
+ */
   GetSnapshotContext(job_context, &snapshot_seqs,
                      &earliest_write_conflict_snapshot, &snapshot_checker);
   Status status;
@@ -248,6 +279,9 @@ Status DBImpl::FlushMemTablesToOutputFiles(
     ColumnFamilyData* cfd = arg.cfd_;
     MutableCFOptions mutable_cf_options = *cfd->GetLatestMutableCFOptions();
     SuperVersionContext* superversion_context = arg.superversion_context_;
+/** comment by hy 2020-06-18
+ * # 下盘
+ */
     Status s = FlushMemTableToOutputFile(
         cfd, mutable_cf_options, made_progress, job_context,
         superversion_context, snapshot_seqs, earliest_write_conflict_snapshot,
@@ -273,6 +307,7 @@ Status DBImpl::FlushMemTablesToOutputFiles(
  * column families are not flushed successfully, this function does not have
  * any side-effect on the state of the database.
  */
+//DBImpl::FlushMemTablesToOutputFiles
 Status DBImpl::AtomicFlushMemTablesToOutputFiles(
     const autovector<BGFlushArg>& bg_flush_args, bool* made_progress,
     JobContext* job_context, LogBuffer* log_buffer, Env::Priority thread_pri) {
@@ -1476,6 +1511,8 @@ void DBImpl::GenerateFlushRequest(const autovector<ColumnFamilyData*>& cfds,
   }
 }
 
+//这个函数用来强制刷新刷新memtable到磁盘，比如用户直接调用Flush接口.
+//switchmemtable->flushrequested->maybescheduleflushorcompaction.
 Status DBImpl::FlushMemTable(ColumnFamilyData* cfd,
                              const FlushOptions& flush_options,
                              FlushReason flush_reason, bool writes_stopped) {
@@ -1764,6 +1801,10 @@ Status DBImpl::EnableAutoCompaction(
   return s;
 }
 
+//在RocksDB中所有的compact都是在后台线程中进行的，这个线程就是BGWorkCompaction.
+// 这个线程只有在两种情况下被调用，一个是 手动compact(RunManualCompaction),
+// 一个就是自动(MaybeScheduleFlushOrCompaction),
+//而MaybeScheduleFlushOrCompaction就是会在切换WAL(SwitchWAL)或者writebuffer满的时候(HandleWriteBufferFull)被调用.
 void DBImpl::MaybeScheduleFlushOrCompaction() {
   mutex_.AssertHeld();
   if (!opened_successfully_) {
@@ -1792,6 +1833,9 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     FlushThreadArg* fta = new FlushThreadArg;
     fta->db_ = this;
     fta->thread_pri_ = Env::Priority::HIGH;
+/** comment by hy 2020-06-18
+ * # BGWorkFlush 调用 下 table 与 WAL 下盘
+ */
     env_->Schedule(&DBImpl::BGWorkFlush, fta, Env::Priority::HIGH, this,
                    &DBImpl::UnscheduleFlushCallback);
   }
@@ -1924,6 +1968,7 @@ ColumnFamilyData* DBImpl::PickCompactionFromQueue(
   return cfd;
 }
 
+//将对应的ColumnFamily加入到flush queue中.
 void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
                                   FlushReason flush_reason) {
   if (flush_req.empty()) {
@@ -1939,7 +1984,9 @@ void DBImpl::SchedulePendingFlush(const FlushRequest& flush_req,
 }
 
 void DBImpl::SchedulePendingCompaction(ColumnFamilyData* cfd) {
-  if (!cfd->queued_for_compaction() && cfd->NeedsCompaction()) {
+  //unscheduled_compactions_和队列的更新是同步的，因此只有compaction_queue_更新之后，
+  //调用compact后台线程才会进入compact处理.
+  if (!cfd->queued_for_compaction() && cfd->NeedsCompaction()) { //LevelCompactionPicker::NeedsCompaction
     AddToCompactionQueue(cfd);
     ++unscheduled_compactions_;
   }
@@ -1952,16 +1999,26 @@ void DBImpl::SchedulePendingPurge(std::string fname, std::string dir_to_sync,
   purge_queue_.push_back(std::move(file_info));
 }
 
+//DBImpl::MaybeScheduleFlushOrCompaction
+
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
 void DBImpl::BGWorkFlush(void* arg) {
   FlushThreadArg fta = *(reinterpret_cast<FlushThreadArg*>(arg));
   delete reinterpret_cast<FlushThreadArg*>(arg);
 
   IOSTATS_SET_THREAD_POOL_ID(fta.thread_pri_);
   TEST_SYNC_POINT("DBImpl::BGWorkFlush");
+/** comment by hy 2020-06-18
+ * # table 下盘 与 WAL 下盘
+ */
   reinterpret_cast<DBImpl*>(fta.db_)->BackgroundCallFlush(fta.thread_pri_);
   TEST_SYNC_POINT("DBImpl::BGWorkFlush:done");
 }
 
+//在RocksDB中所有的compact都是在后台线程中进行的，这个线程就是BGWorkCompaction.
+// 这个线程只有在两种情况下被调用，一个是 手动compact(RunManualCompaction),
+// 一个就是自动(MaybeScheduleFlushOrCompaction),
 void DBImpl::BGWorkCompaction(void* arg) {
   CompactionArg ca = *(reinterpret_cast<CompactionArg*>(arg));
   delete reinterpret_cast<CompactionArg*>(arg);
@@ -2010,6 +2067,11 @@ void DBImpl::UnscheduleFlushCallback(void* arg) {
   TEST_SYNC_POINT("DBImpl::UnscheduleFlushCallback");
 }
 
+//刷新MemTable到磁盘是一个后台线程来做的，这个后台线程叫做BGWorkFlush，最终这个
+//函数会调用BackgroundFlush函数，而BackgroundFlush主要功能是在flush_queue_中找到
+//一个ColumnFamily然后刷新它的memtable到磁盘.
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
 Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
                                LogBuffer* log_buffer, FlushReason* reason,
                                Env::Priority thread_pri) {
@@ -2036,6 +2098,9 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
       job_context->superversion_contexts;
   while (!flush_queue_.empty()) {
     // This cfd is already referenced
+/** comment by hy 2020-06-18
+ * # 获取 Flush Request
+ */
     const FlushRequest& flush_req = PopFirstFromFlushQueue();
     superversion_contexts.clear();
     superversion_contexts.reserve(flush_req.size());
@@ -2059,6 +2124,9 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
   }
 
   if (!bg_flush_args.empty()) {
+/** comment by hy 2020-06-18
+ * # 
+ */
     auto bg_job_limits = GetBGJobLimits();
     for (const auto& arg : bg_flush_args) {
       ColumnFamilyData* cfd = arg.cfd_;
@@ -2072,6 +2140,9 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
           bg_job_limits.max_compactions, bg_flush_scheduled_,
           bg_compaction_scheduled_);
     }
+/** comment by hy 2020-06-18
+ * # 下盘 table 与 WAL
+ */
     status = FlushMemTablesToOutputFiles(bg_flush_args, made_progress,
                                          job_context, log_buffer, thread_pri);
     // All the CFDs in the FlushReq must have the same flush reason, so just
@@ -2088,12 +2159,18 @@ Status DBImpl::BackgroundFlush(bool* made_progress, JobContext* job_context,
   return status;
 }
 
+//Flush触发流程 参考https://www.jianshu.com/p/38a38134491b
+//DBImpl::MaybeScheduleFlushOrCompaction->DBImpl::BGWorkFlush->DBImpl::BackgroundCallFlush->DBImpl::BackgroundFlush->FlushMemTablesToOutputFiles->DBImpl::FlushMemTableToOutputFile->
+//	FlushJob::run->FlushJob::WriteLevel0Table
 void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
   bool made_progress = false;
   JobContext job_context(next_job_id_.fetch_add(1), true);
 
   TEST_SYNC_POINT("DBImpl::BackgroundCallFlush:start");
 
+/** comment by hy 2020-06-18
+ * # Logger::get 获取内容,写 trace
+ */
   LogBuffer log_buffer(InfoLogLevel::INFO_LEVEL,
                        immutable_db_options_.info_log.get());
   {
@@ -2104,7 +2181,9 @@ void DBImpl::BackgroundCallFlush(Env::Priority thread_pri) {
     auto pending_outputs_inserted_elem =
         CaptureCurrentFileNumberInPendingOutputs();
     FlushReason reason;
-
+/** comment by hy 2020-06-18
+ * # 下盘动作
+ */
     Status s = BackgroundFlush(&made_progress, &job_context, &log_buffer,
                                &reason, thread_pri);
     if (!s.ok() && !s.IsShutdownInProgress() &&

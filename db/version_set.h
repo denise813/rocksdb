@@ -423,6 +423,9 @@ class VersionStorageInfo {
   int num_non_empty_levels_;  // Number of levels. Any level larger than it
                               // is guaranteed to be empty.
   // Per-level max bytes
+  // Per-level max bytes
+  //level_max_bytes这个数组是在VersionStorageInfo::CalculateBaseBytes 这个函数中被初始化
+
   std::vector<uint64_t> level_max_bytes_;
 
   // A short brief metadata of files per level
@@ -496,6 +499,10 @@ class VersionStorageInfo {
   // are initialized by Finalize().
   // The most critical level to be compacted is listed first
   // These are used to pick the best compaction level
+  //CompactionScore,这里将会涉及到两个变量,这两个变量分别保存了level以
+  //及每个level所对应的score(这里score越高表示compact优先级越高)，而score小于１则表示不需要compact.
+  //获取score使用见LevelCompactionPicker::NeedsCompaction
+  //这两个vector是在VersionStorageInfo::ComputeCompactionScore中被更新
   std::vector<double> compaction_score_;
   std::vector<int> compaction_level_;
   int l0_delay_trigger_count_ = 0;  // Count used to trigger slow down and stop
@@ -535,6 +542,10 @@ class VersionStorageInfo {
   void operator=(const VersionStorageInfo&) = delete;
 };
 
+/*
+Version是管理某个版本的所有sstable的类，就其导出接口而言，无非是遍历sstable，查找k/v。
+ 以及为compaction做些事情，给定range，检查重叠情况。
+*/
 class Version {
  public:
   // Append to *iters a sequence of iterators that will
@@ -742,6 +753,14 @@ struct ObsoleteFileInfo {
 
 class BaseReferencedVersionBuilder;
 
+/*
+VersionSet 是所有Version的集合，管理着所有存活的Version。
+　VersionEdit 表示Version之间的变化，相当于delta 增量，表示有增加了多少文件，删除了文件。下图表示他们之间的关系。
+Version0 +VersionEdit-->Version1
+　VersionEdit会保存到MANIFEST文件中，当做数据恢复时就会从MANIFEST文件中读出来重建数据。
+
+MANIFEST可以参考http://mysql.taobao.org/monthly/2018/05/08/
+*/
 class VersionSet {
  public:
   VersionSet(const std::string& dbname, const ImmutableDBOptions* db_options,
@@ -807,6 +826,7 @@ class VersionSet {
   // Recover the last saved descriptor from persistent storage.
   // If read_only == true, Recover() will not complain if some column families
   // are not opened
+  //恢复函数，从磁盘恢复最后保存的元信息
   Status Recover(const std::vector<ColumnFamilyDescriptor>& column_families,
                  bool read_only = false);
 
@@ -852,6 +872,7 @@ class VersionSet {
   }
 
   // Allocate and return a new file number
+  // 分配并返回新的文件编号  
   uint64_t NewFileNumber() { return next_file_number_.fetch_add(1); }
 
   // Fetch And Add n new file number
@@ -1033,15 +1054,17 @@ class VersionSet {
       uint64_t* min_log_number_to_keep, uint32_t* max_column_family);
 
   std::unique_ptr<ColumnFamilySet> column_family_set_;
-
+  // 操作系统封装  
   Env* const env_;
   const std::string dbname_;
   const ImmutableDBOptions* const db_options_;
+  // log文件编号   NewFileNumber
   std::atomic<uint64_t> next_file_number_;
   // Any log number equal or lower than this should be ignored during recovery,
   // and is qualified for being deleted in 2PC mode. In non-2PC mode, this
   // number is ignored.
   std::atomic<uint64_t> min_log_number_to_keep_2pc_ = {0};
+   // manifest文件编号  
   uint64_t manifest_file_number_;
   uint64_t options_file_number_;
   uint64_t pending_manifest_file_number_;
@@ -1063,12 +1086,15 @@ class VersionSet {
   uint64_t prev_log_number_;  // 0 or backing store for memtable being compacted
 
   // Opened lazily
+  //当前manifest-log文件(MANIFEST-000005)
   std::unique_ptr<log::Writer> descriptor_log_;
 
   // generates a increasing version number for every new version
   uint64_t current_version_number_;
 
   // Queue of writers to the manifest file
+  //表示需要写入到manifest-log文件(MANIFEST-000005)中的内容.
+  //入队VersionSet::LogAndApply，VersionSet::ProcessManifestWrites中唤醒
   std::deque<ManifestWriter*> manifest_writers_;
 
   // Current size of manifest file

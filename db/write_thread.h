@@ -26,8 +26,10 @@
 
 namespace rocksdb {
 
+//DBImpl.write_thread_                   真正的线程在DBImpl.env_
 class WriteThread {
  public:
+  //状态转换图可以参考https://cloud.tencent.com/developer/article/1143439
   enum State : uint8_t {
     // The initial state of a writer.  This is a Writer that is
     // waiting in JoinBatchGroup.  This state can be left when another
@@ -37,7 +39,7 @@ class WriteThread {
     // (-> STATE_COMPLETED), or when a leader that has chosen to perform
     // updates in parallel and needs this Writer to apply its batch (->
     // STATE_PARALLEL_FOLLOWER).
-    STATE_INIT = 1,
+    STATE_INIT = 1, //write的初始状态
 
     // The state used to inform a waiting Writer that it has become the
     // leader, and it should now build a write batch group.  Tricky:
@@ -47,40 +49,53 @@ class WriteThread {
     // a terminal state unless the leader chooses to make this a parallel
     // batch, in which case the last parallel worker to finish will move
     // the leader to STATE_COMPLETED.
-    STATE_GROUP_LEADER = 2,
+    /*
+    leader是怎么选出来并且是怎么进行Group Commit？
+    
+    当写线程要提交事务时会将自己对应的Write实例添加到Write链表的尾部。
+    此时存在一种特殊情况，即当前待提交的线程是加入Write链表的第一个线程。在RocksDB的逻辑中，第一个加入链表的线程将成为leader线程。
+    */
+    STATE_GROUP_LEADER = 2, //被选为leader
 
     // The state used to inform a waiting writer that it has become the
     // leader of memtable writer group. The leader will either write
     // memtable for the whole group, or launch a parallel group write
     // to memtable by calling LaunchParallelMemTableWrite.
-    STATE_MEMTABLE_WRITER_LEADER = 4,
+    STATE_MEMTABLE_WRITER_LEADER = 4,//负责串行地将所有follower写入memtable的leader
 
     // The state used to inform a waiting writer that it has become a
     // parallel memtable writer. It can be the group leader who launch the
     // parallel writer group, or one of the followers. The writer should then
     // apply its batch to the memtable concurrently and call
     // CompleteParallelMemTableWriter.
-    STATE_PARALLEL_MEMTABLE_WRITER = 8,
+    //leader线程将通过调用LaunchParallelMemTableWriters函数通知所有的follower线程并发写memtable。
+    STATE_PARALLEL_MEMTABLE_WRITER = 8,//并发写memtable的follower
 
     // A follower whose writes have been applied, or a parallel leader
     // whose followers have all finished their work.  This is a terminal
     // state.
-    STATE_COMPLETED = 16,
+    STATE_COMPLETED = 16, //Group Commit完成
 
     // A state indicating that the thread may be waiting using StateMutex()
     // and StateCondVar()
-    STATE_LOCKED_WAITING = 32,
+    STATE_LOCKED_WAITING = 32, //write等待自己状态变化
   };
 
   struct Writer;
 
-  struct WriteGroup {
-    Writer* leader = nullptr;
-    Writer* last_writer = nullptr;
+  //参考DBImpl::WriteImpl   WriteThread::EnterAsBatchGroupLeader
+  struct WriteGroup {//Write和WriteGroup通过WriteThread::EnterAsBatchGroupLeader关联
+    //当写线程要提交事务时会将自己对应的Write实例添加到Write链表的尾部。
+    //此时存在一种特殊情况，即当前待提交的线程是加入Write链表的第一个线程。
+    //在RocksDB的逻辑中，第一个加入链表的线程将成为leader线程。
+    Writer* leader = nullptr; //该WriteGroup的第一个Writer
+    //WriteGroup中的最后一个Writer
+    Writer* last_writer = nullptr; 
     SequenceNumber last_sequence;
     // before running goes to zero, status needs leader->StateMutex()
     Status status;
     std::atomic<size_t> running;
+    //该group组下面有多少个writer线程
     size_t size = 0;
 
     struct Iterator {
@@ -112,8 +127,14 @@ class WriteThread {
   };
 
   // Information kept for every waiting writer.
+  //一个WriteThread::Writer代表一个写线程，和一个WriteBatch(代表这个线程要写的数据)关联，多个线程同时写，就会有多个线程同时走到该函数中，
+  //生成多个一个WriteThread::Writer,这多个WriteThread::Writer通过JoinBatchGroup组织成链表结构，参考DBImpl::WriteImpl
+  
+  //参考https://cloud.tencent.com/developer/article/1143439
+  //DBImpl::PipelinedWriteImpl
   struct Writer {
-    WriteBatch* batch;
+    //每个写线程都会生成一个WriteThread::Write的实例，关联到对应的一个WriteBatch。
+    WriteBatch* batch; 
     bool sync;
     bool no_slowdown;
     bool disable_wal;
@@ -125,14 +146,26 @@ class WriteThread {
     WriteCallback* callback;
     bool made_waitable;          // records lazy construction of mutex and cv
     std::atomic<uint8_t> state;  // write under StateMutex() or pre-link
-    WriteGroup* write_group;
+    //赋值见WriteThread::EnterAsBatchGroupLeader
+    WriteGroup* write_group; //该write线程所属的group组
     SequenceNumber sequence;  // the sequence number to use for the first key
     Status status;
     Status callback_status;   // status returned by callback->Callback()
 
     std::aligned_storage<sizeof(std::mutex)>::type state_mutex_bytes;
     std::aligned_storage<sizeof(std::condition_variable)>::type state_cv_bytes;
+
+    /*
+      一个链表的结构，待提交的事务可以通过JoinBatchGroup(&w)函数将本WriteBatch对
+    应的Write实例加到Write链表中。自然地，Write链表中的一个元素代表着一个待提
+    交的写线程。写到WAL文件中的内容有先后顺序，这里也只需要按照链表中的先后顺
+    序写入即可。多个Write对象的实例同样合并成一个写WAL操作，由一个线程负责进行fsync即可。
+    WriteThread::CreateMissingNewerLinks
+    */
+    //可以参考WriteThread::LinkOne  
+    //指向老的writer
     Writer* link_older;  // read/write only before linking, or as leader
+    //指向最新的writer  WriteThread::LinkOne
     Writer* link_newer;  // lazy, read/write only before linking, or as leader
 
     Writer()
@@ -335,6 +368,7 @@ class WriteThread {
   // write is enabled.
   void WaitForMemTableWriters();
 
+  //DBImpl::PipelinedWriteImpl
   SequenceNumber UpdateLastSequence(SequenceNumber sequence) {
     if (sequence > last_sequence_) {
       last_sequence_ = sequence;
@@ -355,6 +389,7 @@ class WriteThread {
   const uint64_t slow_yield_usec_;
 
   // Allow multiple writers write to memtable concurrently.
+  //是否支持对各writer并发写memtable,默认true，见struct DBOptions
   const bool allow_concurrent_memtable_write_;
 
   // Enable pipelined write to WAL and memtable.
@@ -362,6 +397,8 @@ class WriteThread {
 
   // Points to the newest pending writer. Only leader can remove
   // elements, adding can be done lock-free by anybody.
+  //WriteThread::JoinBatchGroup中赋值，表示最新的writer  
+  //也就是writer链表头，参考WriteThread::CreateMissingNewerLinks
   std::atomic<Writer*> newest_writer_;
 
   // Points to the newest pending memtable writer. Used only when pipelined
@@ -370,6 +407,7 @@ class WriteThread {
 
   // The last sequence that have been consumed by a writer. The sequence
   // is not necessary visible to reads because the writer can be ongoing.
+  //赋值见UpdateLastSequence
   SequenceNumber last_sequence_;
 
   // A dummy writer to indicate a write stall condition. This will be inserted

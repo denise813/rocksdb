@@ -32,8 +32,14 @@ class InternalKey;
 // data structures.
 // The highest bit of the value type needs to be reserved to SST tables
 // for them to do more flexible encoding.
+/*
+插入数据时：type（kTypeValue、kTypeDeletion），Key_size，Key，Value_size，Value
+删除数据时：type（kTypeValue、kTypeDeletion），Key_size，Key
+*/
+//参考ReadRecordFromWriteBatch
 enum ValueType : unsigned char {
   kTypeDeletion = 0x0,
+  //value就表示是插入
   kTypeValue = 0x1,
   kTypeMerge = 0x2,
   kTypeLogData = 0x3,               // WAL only.
@@ -85,14 +91,46 @@ static const SequenceNumber kMaxSequenceNumber = ((0x1ull << 56) - 1);
 
 static const SequenceNumber kDisableGlobalSequenceNumber = port::kMaxUint64;
 
+//键值比较
+// 内存数据库中所有的数据项都是按照键值比较规则进行排序的。这个比较规则可以由用户自己定制，也可以
+// 使用系统默认的。在这里介绍一下系统默认的比较规则。
+
+//默认的比较规则：
+// 首先按照字典序比较用户定义的key（ukey），若用户定义key值大，整个internalKey就大；
+// 若用户定义的key相同，则序列号大的internalKey值就小；
+// 通过这样的比较规则，则所有的数据项首先按照用户key进行升序排列；当用户key一致时，按照序列号进行降序排列，
+// 这样可以保证首先读到序列号大的数据项。
+
+//InternalKey和ParsedInternalKey区别?
+//1. InternalKey（class InternalKey）是一个复合概念，是有几个部分组合成的一个key，
+//  ParsedInternalKey（struct ParsedInternalKey）就是对InternalKey分拆后的结果
+//2. InternalKey 是一个只存储了一个string，它使用一个 DecodeFrom() 函数将Slice类型的InternalKey
+//  解码出string类型的InternalKey. 也就是说InternalKey是由User_key.data + SequenceNumber + ValueType
+//  组合而成的，顺便先分析下几个Key相关的函数，它们是了解Internal Key和User Key的关键。
+//3. InternalKey和ParsedInternalKey相互转换的两个函数，如下。
+//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
+//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
+
+//注意LookupKey和ParsedInternalKey对应比较
+//解码获取成员值见ParseInternalKey
 struct ParsedInternalKey {
+  //用户定义的key：这个key值也就是原生的key值；
   Slice user_key;
+  //快照seq可以参考https://leveldb-handbook.readthedocs.io/zh/latest/rwopt.html#id8
+  //internalKey的seq字段使用的便是快照对应的seq
+  //序列号：rocksdb中，每一次写操作都有一个sequence number，标志着写入操作的先后顺序。
+  //由于在rocksdb中，可能会有多条相同key的数据项同时存储在数据库中，因此需要有一个序列
+  //号来标识这些数据项的新旧情况。序列号最大的数据项为最新值；
+  //同时sequence number是实现事务处理的关键，同时也是MVCC的基础。
   SequenceNumber sequence;
+  //类型：标志本条数据项的类型，为更新还是删除；
+  //取值见enum ValueType {}   kTypeDeletion  kTypeValue kTypeMerge 
   ValueType type;
 
   ParsedInternalKey()
       : sequence(kMaxSequenceNumber)  // Make code analyzer happy
   {}  // Intentionally left uninitialized (for speed)
+  //InternalKey解码
   ParsedInternalKey(const Slice& u, const SequenceNumber& seq, ValueType t)
       : user_key(u), sequence(seq), type(t) {}
   std::string DebugString(bool hex = false) const;
@@ -135,6 +173,7 @@ extern bool ParseInternalKey(const Slice& internal_key,
                              ParsedInternalKey* result);
 
 // Returns the user key portion of an internal key.
+//获取ParsedInternalKey.user_key
 inline Slice ExtractUserKey(const Slice& internal_key) {
   assert(internal_key.size() >= 8);
   return Slice(internal_key.data(), internal_key.size() - 8);
@@ -146,6 +185,7 @@ inline uint64_t ExtractInternalKeyFooter(const Slice& internal_key) {
   return DecodeFixed64(internal_key.data() + n - 8);
 }
 
+//获取ParsedInternalKey.type
 inline ValueType ExtractValueType(const Slice& internal_key) {
   uint64_t num = ExtractInternalKeyFooter(internal_key);
   unsigned char c = num & 0xff;
@@ -160,6 +200,7 @@ class InternalKeyComparator
 #endif
     : public Comparator {
  private:
+  //用于user key的比较
   UserComparatorWrapper user_comparator_;
   std::string name_;
 
@@ -192,6 +233,26 @@ class InternalKeyComparator
 // Modules in this directory should keep internal keys wrapped inside
 // the following class instead of plain strings so that we do not
 // incorrectly use string comparisons instead of an InternalKeyComparator.
+//键值比较
+// 内存数据库中所有的数据项都是按照键值比较规则进行排序的。这个比较规则可以由用户自己定制，也可以
+// 使用系统默认的。在这里介绍一下系统默认的比较规则。
+
+//默认的比较规则：
+// 首先按照字典序比较用户定义的key（ukey），若用户定义key值大，整个internalKey就大；
+// 若用户定义的key相同，则序列号大的internalKey值就小；
+// 通过这样的比较规则，则所有的数据项首先按照用户key进行升序排列；当用户key一致时，按照序列号进行降序排列，
+// 这样可以保证首先读到序列号大的数据项。
+
+
+//InternalKey和ParsedInternalKey区别?
+//1. InternalKey（class InternalKey）是一个复合概念，是有几个部分组合成的一个key，
+//  ParsedInternalKey（struct ParsedInternalKey）就是对InternalKey分拆后的结果
+//2. InternalKey 是一个只存储了一个string，它使用一个 DecodeFrom() 函数将Slice类型的InternalKey
+//  解码出string类型的InternalKey. 也就是说InternalKey是由User_key.data + SequenceNumber + ValueType
+//  组合而成的，顺便先分析下几个Key相关的函数，它们是了解Internal Key和User Key的关键。
+//3. InternalKey和ParsedInternalKey相互转换的两个函数，如下。
+//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
+//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
 class InternalKey {
  private:
   std::string rep_;
@@ -259,12 +320,19 @@ inline int InternalKeyComparator::Compare(const InternalKey& a,
   return Compare(a.Encode(), b.Encode());
 }
 
+//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
+//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
+
+//Internal key的解码 将编码后的internal_key解码为* result。
 inline bool ParseInternalKey(const Slice& internal_key,
                              ParsedInternalKey* result) {
   const size_t n = internal_key.size();
   if (n < 8) return false;
+  // DecodeFixed64函数是PutFixed64函数的逆过程，返回sequence和type的打包结果，并赋值给num。
   uint64_t num = DecodeFixed64(internal_key.data() + n - 8);
+  // 截取低8位，赋值给c
   unsigned char c = num & 0xff;
+  // 右移8位，赋值给sequence
   result->sequence = num >> 8;
   result->type = static_cast<ValueType>(c);
   assert(result->type <= ValueType::kMaxValue);
@@ -293,30 +361,39 @@ inline uint64_t GetInternalKeySeqno(const Slice& internal_key) {
 }
 
 // A helper class useful for DBImpl::Get()
-class LookupKey {
+//每次调用Get的时候，RocksDB都会构造一个LookupKey,这里我们可以简单的认为这个seq就
+//是当前的version最后一次写成功的seq(以后会介绍这里的publish_seq).
+
+//根据user key或者memtabel key在skiplist中查找见SkipListRep::iterator::seek
+//见DBImpl::GetImpl
+class LookupKey { //注意LookupKey和ParsedInternalKey对应比较
  public:
   // Initialize *this for looking up user_key at a snapshot with
   // the specified sequence number.
+  //每次构造lookupkey的时候，必须得传入一个seq,那么这个seq是如何计算的呢，可以参考DBImpl::GetImpl
   LookupKey(const Slice& _user_key, SequenceNumber sequence);
 
   ~LookupKey();
 
   // Return a key suitable for lookup in a MemTable.
+  //也就是下面的#1 #2 #3三部分和
   Slice memtable_key() const {
     return Slice(start_, static_cast<size_t>(end_ - start_));
   }
 
   // Return an internal key (suitable for passing to an internal iterator)
+  //也就是下面的#2 #3
   Slice internal_key() const {
     return Slice(kstart_, static_cast<size_t>(end_ - kstart_));
   }
 
   // Return the user key
+  //也就是下面的#2 
   Slice user_key() const {
     return Slice(kstart_, static_cast<size_t>(end_ - kstart_ - 8));
   }
 
- private:
+ private: //参考LookupKey::LookupKey
   // We construct a char array of the form:
   //    klength  varint32               <-- start_
   //    userkey  char[klength]          <-- kstart_
@@ -324,9 +401,14 @@ class LookupKey {
   //                                    <-- end_
   // The array is a suitable MemTable key.
   // The suffix starting with "userkey" can be used as an InternalKey.
+  //参考LookupKey::LookupKey
+  //start_上面的klength起始地址
   const char* start_;
+  //kstart_记录了user key string的起始地址
   const char* kstart_;
+  //end_指向tag尾部
   const char* end_;
+  //最开会利用这个空间，如果空间不够，重新new
   char space_[200];  // Avoid allocation for short keys
 
   // No copying allowed

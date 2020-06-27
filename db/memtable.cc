@@ -77,6 +77,8 @@ MemTable::MemTable(const InternalKeyComparator& cmp,
                  ? &mem_tracker_
                  : nullptr,
              mutable_cf_options.memtable_huge_page_size),
+      //实际上是跳跃表 RocksDB有多种MemTable的实现，那么它是如何来做的呢，RocksDB通过memtable_factory
+      //来根据用户的设置来创建不同的memtable.这里要注意的是核心的memtable实现是在MemTable这个类的table_域中.
       table_(ioptions.memtable_factory->CreateMemTableRep(
           comparator_, &arena_, mutable_cf_options.prefix_extractor.get(),
           ioptions.info_log, column_family_id)),
@@ -143,6 +145,7 @@ size_t MemTable::ApproximateMemoryUsage() {
   return total_usage;
 }
 
+//这个函数主要的判断就是判断是否当前MemTable的内存使用是否超过了write_buffer_size，如果超过了，那么就返回true.
 bool MemTable::ShouldFlushNow() const {
   size_t write_buffer_size = write_buffer_size_.load(std::memory_order_relaxed);
   // In a lot of times, we cannot allocate arena blocks that exactly matches the
@@ -201,11 +204,18 @@ bool MemTable::ShouldFlushNow() const {
   return arena_.AllocatedAndUnused() < kArenaBlockSize / 4;
 }
 
+//等到后面某个时间段再调用flush线程来刷新内容到磁盘.
+//在这种情况下，每一个memtable都会有一个状态叫做flush_state_,
+//而每个memtable都有可能有三种状态.而状态的更新是通过UpdateFlushState
+//来进行的.这里可以推测的到这些都是对于单个memtable的限制.
+
+//UpdateFlushState什么时候会被调用呢，就是当你每次操作memtable的时候，比如update/add这些操作.
 void MemTable::UpdateFlushState() {
   auto state = flush_state_.load(std::memory_order_relaxed);
   if (state == FLUSH_NOT_REQUESTED && ShouldFlushNow()) {
     // ignore CAS failure, because that means somebody else requested
     // a flush
+    //当shoudflushnow之后，将会设置flush_state_状态为FLUSH_REQUESTED,也就是此memtable将会被flush.
     flush_state_.compare_exchange_strong(state, FLUSH_REQUESTED,
                                          std::memory_order_relaxed,
                                          std::memory_order_relaxed);
@@ -271,6 +281,12 @@ const char* EncodeKey(std::string* scratch, const Slice& target) {
   return scratch->data();
 }
 
+/*
+ArenaWrappedDBIter是暴露给用户的Iterator，它包含DBIter，DBIter则包含InternalIterator，
+InternalIterator顾名思义，是内部定义，MergeIterator、TwoLevelIterator、BlockIter、
+MemTableIter、LevelFileNumIterator等都是继承自InternalIterator
+图解参考http://kernelmaker.github.io/Rocksdb_Iterator
+*/
 class MemTableIterator : public InternalIterator {
  public:
   MemTableIterator(const MemTable& mem, const ReadOptions& read_options,
@@ -461,6 +477,21 @@ MemTable::MemTableStats MemTable::ApproximateStats(const Slice& start_ikey,
   return {entry_count * (data_size / n), entry_count};
 }
 
+/* 
+memtable insert堆栈信息:
+#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
+#2  rocksdb::MemTable::Add
+#3  rocksdb::MemTableInserter::PutCF
+#4  rocksdb::WriteBatch::Iterate
+#5  rocksdb::WriteBatch::Iterate
+#6  rocksdb::WriteBatchInternal::InsertInto
+#7  rocksdb::DBImpl::WriteImpl
+#8  rocksdb::DBImpl::Write 
+*/
+
+//图解参考https://blog.csdn.net/caoshangpa/article/details/78901792
+//MemTable::Add和MemTable::Get对应
 bool MemTable::Add(SequenceNumber s, ValueType type,
                    const Slice& key, /* user key */
                    const Slice& value, bool allow_concurrent,
@@ -481,15 +512,30 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
       type == kTypeRangeDeletion ? range_del_table_ : table_;
   KeyHandle handle = table->Allocate(encoded_len, &buf);
 
+  //那就是skiplist里面只有key,而RocksDB是一个ＫＶ存储，那么这个KV是如何存储的呢，
+  //这里是这样的，RocksDB会将KV打包成一个key传递给SkipList, 对应的KEY的结构是这样的
+  //如果要解析这里的封装的KV包，则在在SkipList(以跳跃表为例，实际上可能还有hashLIST等)的Comparator中
+  //实现的(compare_)，见InlineSkipList<Comparator>::Insert
+  
+  //buf内容格式:keylen | key | type | valuelen | value
+  //也就是填充handle
+  
+  //keylen | key
   char* p = EncodeVarint32(buf, internal_key_size);
   memcpy(p, key.data(), key_size);
   Slice key_slice(p, key_size);
   p += key_size;
+
+  //type
   uint64_t packed = PackSequenceAndType(s, type);
   EncodeFixed64(p, packed);
   p += 8;
+
+  //valuelen | value
   p = EncodeVarint32(p, val_size);
   memcpy(p, value.data(), val_size);
+
+  
   assert((unsigned)(p + val_size - buf) == (unsigned)encoded_len);
   if (!allow_concurrent) {
     // Extract prefix for insert with hint.
@@ -501,6 +547,7 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
         return res;
       }
     } else {
+      //KV添加到跳跃表中 SkipListRep::InsertKey
       bool res = table->InsertKey(handle);
       if (UNLIKELY(!res)) {
         return res;
@@ -539,6 +586,8 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
     assert(post_process_info == nullptr);
     UpdateFlushState();
   } else {
+    //插入到对应hash-list或者skiplist中
+    //跳跃表对应InlineSkipList<>::InsertConcurrently
     bool res = table->InsertKeyConcurrently(handle);
     if (UNLIKELY(!res)) {
       return res;
@@ -580,6 +629,8 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
 // Callback from MemTable::Get()
 namespace {
 
+//MemTable::Get中构造
+//这个数据结构用来保存查找内容时的上下文.
 struct Saver {
   Status* status;
   const LookupKey* key;
@@ -608,6 +659,13 @@ struct Saver {
 };
 }  // namespace
 
+//(SaveValue)函数,这个函数有两个参数，第一个参数是之前保存的Saver对象，第二个
+//则就是我们在SkipListRep::iterator::seek->InlineSkipList<>::Iterator::Seek中定
+//位到的位置.这个函数要做的比较简单，首先就是判断是否得到的key和我们传递进来的key相同，
+//如果不同，则说明查找的key不合法，因此直接返回.这里我们着重来看对于插入和删除的处理.
+
+//第一个参数是之前保存的Saver对象，第二个则就是我们在skiplist中定位到的位置
+//MemTable::Get->MemTableRep::Get
 static bool SaveValue(void* arg, const char* entry) {
   Saver* s = reinterpret_cast<Saver*>(arg);
   assert(s != nullptr);
@@ -628,6 +686,7 @@ static bool SaveValue(void* arg, const char* entry) {
   // all entries with overly large sequence numbers.
   uint32_t key_length;
   const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
+  //先找到对应的key
   if (s->mem->GetInternalKeyComparator().user_comparator()->Equal(
           Slice(key_ptr, key_length - 8), s->key->user_key())) {
     // Correct user key
@@ -662,7 +721,9 @@ static bool SaveValue(void* arg, const char* entry) {
           return false;
         }
         FALLTHROUGH_INTENDED;
-      case kTypeValue: {
+
+	  //当查找到对应的值的时候，直接赋值然后返回给用户(设置found_final_value).
+      case kTypeValue: { //获取value
         if (s->inplace_update_support) {
           s->mem->GetLock(s->key->user_key())->ReadLock();
         }
@@ -687,7 +748,7 @@ static bool SaveValue(void* arg, const char* entry) {
         }
         return false;
       }
-      case kTypeDeletion:
+      case kTypeDeletion://这里可以看到如果是Delete的话，直接返回NotFound.
       case kTypeSingleDeletion:
       case kTypeRangeDeletion: {
         if (*(s->merge_in_progress)) {
@@ -738,6 +799,15 @@ static bool SaveValue(void* arg, const char* entry) {
   return false;
 }
 
+//MemTable::Add和MemTable::Get对应
+
+// 如果能找到key对应的value, 将该value存储到*value参数中，返回值为true。
+// 如果这个key中的有删除标识,存放一个NotFound()错误到*status参数中，返回值为true。
+// 否则返回值为false
+
+//DBImpl::GetImpl
+//memtable查找MemTable::Get  SST文件中查找Version::Get
+//参考http://mysql.taobao.org/monthly/2018/11/05/
 bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
                    MergeContext* merge_context,
                    SequenceNumber* max_covering_tombstone_seq,
@@ -763,6 +833,9 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
   bool found_final_value = false;
   bool merge_in_progress = s->IsMergeInProgress();
   bool may_contain = true;
+
+  //写入Data Block的数据会同时更新对应Meta Block中的过滤器。读取数据时也会首先经过布隆过滤器（Bloom Filter）过滤,用于快速判断key是否存在
+  //先在bloom中查找该key是否可能存在，bloom参考https://blog.csdn.net/caoshangpa/article/details/79049678
   if (bloom_filter_) {
     // when both memtable_whole_key_filtering and prefix_extractor_ are set,
     // only do whole key filtering for Get() to save CPU
@@ -774,14 +847,16 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
           bloom_filter_->MayContain(prefix_extractor_->Transform(user_key));
     }
   }
-  if (bloom_filter_ && !may_contain) {
+  if (bloom_filter_ && !may_contain) { //bloom中没找到，说明该key不存在
     // iter is null if prefix bloom says the key does not exist
     PERF_COUNTER_ADD(bloom_memtable_miss_count, 1);
     *seq = kMaxSequenceNumber;
   } else {
-    if (bloom_filter_) {
+    if (bloom_filter_) { //bloom中命中
       PERF_COUNTER_ADD(bloom_memtable_hit_count, 1);
     }
+
+	//从table 跳跃表中获取对应的value  seq
     Saver saver;
     saver.status = s;
     saver.found_final_value = &found_final_value;
@@ -799,6 +874,7 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
     saver.env_ = env_;
     saver.callback_ = callback;
     saver.is_blob_index = is_blob_index;
+	//MemTableRep::Get
     table_->Get(key, &saver, SaveValue);
 
     *seq = saver.seq;
@@ -984,11 +1060,16 @@ size_t MemTable::CountSuccessiveMergeEntries(const LookupKey& key) {
   return num_successive_merges;
 }
 
+//MemTableRep这个类用来抽象不同的MemTable的实现，也就是说它是一个虚类，然后不同的MemTable实现了它
+//skiplist也就是默认的MemTable实现.
+//MemTable::Get
 void MemTableRep::Get(const LookupKey& k, void* callback_args,
                       bool (*callback_func)(void* arg, const char* entry)) {
   auto iter = GetDynamicPrefixIterator();
-  for (iter->Seek(k.internal_key(), k.memtable_key().data());
-       iter->Valid() && callback_func(callback_args, iter->key());
+
+  //先seek，然后执行对应的callback_func
+  for (iter->Seek(k.internal_key(), k.memtable_key().data());  //skiplist对应SkipListRep::seek
+       iter->Valid() && callback_func(callback_args, iter->key()); //callback_func对应SaveValue
        iter->Next()) {
   }
 }

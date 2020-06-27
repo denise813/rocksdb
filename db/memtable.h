@@ -35,6 +35,18 @@ class Mutex;
 class MemTableIterator;
 class MergeContext;
 
+/*
+    在rocksdb中所有KV数据都是存储在Memtable，Immutable Memtable和SSTable中的，Immutable Memtable从结构上讲和Memtable
+是完全一样的，区别仅仅在于其是只读的，不允许写入操作，而Memtable则是允许写入和读取的。当Memtable写入的数据占用内存到
+达指定数量，则自动转换为Immutable Memtable，等待Dump到磁盘中，系统会自动生成新的Memtable供写操作写入新数据，理解了Memtable，
+那么Immutable Memtable自然不在话下。
+    LevelDB的MemTable提供了将KV数据写入，删除以及读取KV记录的操作接口，但是事实上Memtable并不存在真正的删除操作，删除某个
+Key的Value在Memtable内是作为插入一条记录实施的，但是会打上一个Key的删除标记，真正的删除操作是延后的，会在以后的Compaction过
+程中去掉这个KV。 需要注意的是，LevelDB的Memtable中KV对是根据Key大小有序存储的，在系统插入新的KV时，LevelDB要把这个KV插到合
+适的位置上以保持这种Key有序性。其实，LevelDb的Memtable类只是一个接口类，真正的操作是通过背后的SkipList来做的，包括插入操作
+和读取操作等，所以Memtable的核心数据结构是一个SkipList。
+    Memtable主要作用是对skiplist、arena、comparator进行组合和管理，接口函数屏蔽了底层操作，对使用者更加优雅。
+*/
 struct ImmutableMemTableOptions {
   explicit ImmutableMemTableOptions(const ImmutableCFOptions& ioptions,
                                     const MutableCFOptions& mutable_cf_options);
@@ -76,6 +88,35 @@ struct MemTablePostProcessInfo {
 // Eg: The Superversion stores a pointer to the current MemTable (that can
 // be modified) and a separate list of the MemTables that can no longer be
 // written to (aka the 'immutable memtables').
+/*
+    在rocksdb中所有KV数据都是存储在Memtable，Immutable Memtable和SSTable中的，Immutable Memtable从结构上讲和Memtable
+是完全一样的，区别仅仅在于其是只读的，不允许写入操作，而Memtable则是允许写入和读取的。当Memtable写入的数据占用内存到
+达指定数量，则自动转换为Immutable Memtable，等待Dump到磁盘中，系统会自动生成新的Memtable供写操作写入新数据，理解了Memtable，
+那么Immutable Memtable自然不在话下。
+    rocksdb的MemTable提供了将KV数据写入，删除以及读取KV记录的操作接口，但是事实上Memtable并不存在真正的删除操作，删除某个
+Key的Value在Memtable内是作为插入一条记录实施的，但是会打上一个Key的删除标记，真正的删除操作是延后的，会在以后的Compaction过
+程中去掉这个KV。 需要注意的是，LevelDB的Memtable中KV对是根据Key大小有序存储的，在系统插入新的KV时，LevelDB要把这个KV插到合
+适的位置上以保持这种Key有序性。其实，LevelDb的Memtable类只是一个接口类，真正的操作是通过背后的SkipList来做的，包括插入操作
+和读取操作等，所以Memtable的核心数据结构是一个SkipList。
+    Memtable主要作用是对skiplist、arena、comparator进行组合和管理，接口函数屏蔽了底层操作，对使用者更加优雅。
+
+  内存中的MemTable和Immutable MemTable以及磁盘上的几种主要文件：Current文件，Manifest文件，log文件以及SSTable文件。
+当然，LevelDb除了这六个主要部分还有一些辅助的文件，但是以上六个文件和数据结构是LevelDb的主体构成元素。
+
+Manifest:它记载了SSTable各个文件的管理信息，比如属于哪个Level，文件名称叫啥，最小key和最大key各自是多少
+current: 
+ 1. 由于每次启动，都会新建一个Manifest文件，因此leveldb当中可能会存在多个manifest文件。因此需要一个额
+  外的current文件来指示当前系统使用的到底是哪个manifest文件。
+ 2. 这个文件的内容只有一个信息，就是记载当前的manifest文件名。因为在LevleDb的运行过程中，随着Compaction的进行，
+  SSTable文件会发生变化，会有新的文件产生，老的文件被废弃，Manifest也会跟着反映这种变化，此时往往会新生成Manifest
+  文件来记载这种变化，而Current则用来指出哪个Manifest文件才是我们关心的那个Manifest文件。
+
+*/
+
+//在rocksdb中所有KV数据都是存储在Memtable，Immutable Memtable和SSTable中
+//LRUCache针对sstable文件的查找，memtable针对Memtable和Immutable Memtable
+//Memtable的创建(ColumnFamilyData::CreateNewMemtable)是在创建ColumnFamily(VersionSet::CreateColumnFamily)的时候创建的
+//MemTable的写入逻辑见http://mysql.taobao.org/monthly/2018/08/08/
 class MemTable {
  public:
   struct KeyComparator : public MemTableRep::KeyComparator {
@@ -132,6 +173,7 @@ class MemTable {
 
   // This method heuristically determines if the memtable should continue to
   // host more data.
+  //这个函数用来返回当前的memtable是否已经被设置flush_requested状态位。
   bool ShouldScheduleFlush() const {
     return flush_state_.load(std::memory_order_relaxed) == FLUSH_REQUESTED;
   }
@@ -157,6 +199,7 @@ class MemTable {
   // arena: If not null, the arena needs to be used to allocate the Iterator.
   //        Calling ~Iterator of the iterator will destroy all the states but
   //        those allocated in arena.
+  //NewIterator是返回一个迭代器，可以遍历访问memtable的内部数据
   InternalIterator* NewIterator(const ReadOptions& read_options, Arena* arena);
 
   FragmentedRangeTombstoneIterator* NewRangeTombstoneIterator(
@@ -171,6 +214,7 @@ class MemTable {
   //
   // Returns false if MemTableRepFactory::CanHandleDuplicatedKey() is true and
   // the <key, seq> already exists.
+  //Add和Get是添加和获取记录的接口，没有Delete，memtable的delete实际上是插入一条type为kTypeDeletion的记录。
   bool Add(SequenceNumber seq, ValueType type, const Slice& key,
            const Slice& value, bool allow_concurrent = false,
            MemTablePostProcessInfo* post_process_info = nullptr);
@@ -188,6 +232,7 @@ class MemTable {
   // returned).  Otherwise, *seq will be set to kMaxSequenceNumber.
   // On success, *s may be set to OK, NotFound, or MergeInProgress.  Any other
   // status returned indicates a corruption or other unexpected error.
+  //Add和Get是添加和获取记录的接口，没有Delete，memtable的delete实际上是插入一条type为kTypeDeletion的记录。
   bool Get(const LookupKey& key, std::string* value, Status* s,
            MergeContext* merge_context,
            SequenceNumber* max_covering_tombstone_seq, SequenceNumber* seq,
@@ -414,6 +459,10 @@ class MemTable {
   const size_t kArenaBlockSize;
   AllocTracker mem_tracker_;
   ConcurrentArena arena_;
+
+  //实际上是跳跃表  可以是hash_linklist  hash_skiplist等
+  //RocksDB有多种MemTable的实现，那么它是如何来做的呢，RocksDB通过memtable_factory来
+  //根据用户的设置来创建不同的memtable.这里要注意的是核心的memtable实现是在MemTable这个类的table_域中.
   std::unique_ptr<MemTableRep> table_;
   std::unique_ptr<MemTableRep> range_del_table_;
   std::atomic_bool is_range_del_table_empty_;
@@ -424,6 +473,7 @@ class MemTable {
   std::atomic<uint64_t> num_deletes_;
 
   // Dynamically changeable memtable option
+  //表示每个columnfamily的memtable的大小限制
   std::atomic<size_t> write_buffer_size_;
 
   // These are used to manage memtable flushes to storage

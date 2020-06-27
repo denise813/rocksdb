@@ -44,6 +44,8 @@ class InstrumentedMutex;
 class InstrumentedMutexLock;
 struct SuperVersionContext;
 
+//RocksDB · Column Family介绍:http://mysql.taobao.org/monthly/2018/06/09/
+//图解参考 https://blog.csdn.net/flyqwang/article/details/50096377
 extern const double kIncSlowdownRatio;
 
 // ColumnFamilyHandleImpl is the class that clients use to access different
@@ -88,6 +90,7 @@ class ColumnFamilyHandleInternal : public ColumnFamilyHandleImpl {
 };
 
 // holds references to memtable, all immutable memtables and version
+//参考DBImpl::GetImpl
 struct SuperVersion {
   // Accessing members of this class is not thread-safe and requires external
   // synchronization (ie db mutex held or on write thread).
@@ -156,6 +159,8 @@ class ColumnFamilySet;
 
 // This class keeps all the data that a column family needs.
 // Most methods require DB mutex held, unless otherwise noted
+//每一个Column Family都是一个ColumnFamilyData.
+//ColumnFamilySet.dummy_cfd_ //ColumnFamilyHandleImpl.cfd_
 class ColumnFamilyData {
  public:
   ~ColumnFamilyData();
@@ -397,6 +402,7 @@ class ColumnFamilyData {
 
   uint32_t id_;
   const std::string name_;
+  //当前ColumnFamily对应的所有的version(dummy_versions_).
   Version* dummy_versions_;  // Head of circular doubly-linked list of versions.
   Version* current_;         // == dummy_versions->prev_
 
@@ -436,6 +442,7 @@ class ColumnFamilyData {
   // pointers for a circular linked list. we use it to support iterations over
   // all column families that are alive (note: dropped column families can also
   // be alive as long as client holds a reference)
+  //用链表来管理 ColumnFamilySet中用来表示所有ColumnFamily的双向链表.
   ColumnFamilyData* next_;
   ColumnFamilyData* prev_;
 
@@ -455,6 +462,8 @@ class ColumnFamilyData {
   std::unique_ptr<WriteControllerToken> write_controller_token_;
 
   // If true --> this ColumnFamily is currently present in DBImpl::flush_queue_
+  //这个队列将会保存所有的将要被flush到磁盘的ColumnFamily.只有当当前的ColumnFamily
+  //满足flush条件（cfd->imm()->IsFlushPending()）才会将此CF加入到flush队列．
   bool queued_for_flush_;
 
   // If true --> this ColumnFamily is currently present in
@@ -491,6 +500,8 @@ class ColumnFamilyData {
 // * GetColumnFamily() -- either inside of DB mutex or from a write thread
 // * GetNextColumnFamilyID(), GetMaxColumnFamily(), UpdateMaxColumnFamily(),
 // NumberOfColumnFamilies -- inside of DB mutex
+//所有的Column Family都是通过一个叫做ColumnFamilySet的结构来管理的，
+//而每一个Column Family都是一个ColumnFamilyData.
 class ColumnFamilySet {
  public:
   // ColumnFamilySet supports iteration
@@ -514,6 +525,7 @@ class ColumnFamilySet {
     ColumnFamilyData* operator*() { return current_; }
 
    private:
+    //所有的Column Family都是通过一个叫做ColumnFamilySet的结构来管理的，而每一个Column Family都是一个ColumnFamilyData.
     ColumnFamilyData* current_;
   };
 
@@ -563,10 +575,15 @@ class ColumnFamilySet {
   // * when reading, at least one condition needs to be satisfied:
   // 1. DB mutex locked
   // 2. accessed from a single-threaded write thread
+  //map用来保存Column Family名字和对应的id以及ColumnFamilyData的映射
+  ////ColumnFamilySet::CreateColumnFamily和ColumnFamilySet::RemoveColumnFamily对应添加和删除
   std::unordered_map<std::string, uint32_t> column_families_;
   std::unordered_map<uint32_t, ColumnFamilyData*> column_family_data_;
 
+  //RocksDB内部是将每一个ColumnFamily的名字表示为一个uint32类型的ID(max_column_family_).
+  //也就是这个ID是一个简单的递增的数值.
   uint32_t max_column_family_;
+  //实际上是双向链表结构，所有的ColumnFamilyData通过这里连接在一起
   ColumnFamilyData* dummy_cfd_;
   // We don't hold the refcount here, since default column family always exists
   // We are also not responsible for cleaning up default_cfd_cache_. This is
@@ -586,6 +603,7 @@ class ColumnFamilySet {
 // memtables of different column families (specified by ID in the write batch)
 class ColumnFamilyMemTablesImpl : public ColumnFamilyMemTables {
  public:
+  //DBImpl::DBImpl
   explicit ColumnFamilyMemTablesImpl(ColumnFamilySet* column_family_set)
       : column_family_set_(column_family_set), current_(nullptr) {}
 

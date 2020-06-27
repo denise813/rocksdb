@@ -822,6 +822,10 @@ std::unique_ptr<RandomAccessFile> NewReadaheadRandomAccessFile(
 Status NewWritableFile(Env* env, const std::string& fname,
                        std::unique_ptr<WritableFile>* result,
                        const EnvOptions& options) {
+/** comment by hy 2020-06-09
+ * # 由EnvWrapper 调用子实例调用
+     如 PosixEnv,由其包装 WritableFile
+ */
   Status s = env->NewWritableFile(fname, result, options);
   TEST_KILL_RANDOM("NewWritableFile:0", rocksdb_kill_odds * REDUCE_ODDS2);
   return s;

@@ -64,6 +64,35 @@ class VersionStorageInfo;
 class CompactionFilter;
 
 // A Compaction encapsulates information about a compaction.
+/*
+Memtable提供了写入KV记录，删除以及读取KV记录的接口，但是事实上Memtable并不执行真正的删除操作,删除某个
+Key的Value在Memtable内是作为插入一条记录实施的，但是会打上一个Key的删除标记，真正的删除操作在后面的 
+Compaction过程中，lazy delete
+
+Compaction的作用:
+1. delete的数据清理
+2. 数据持久化
+3. 逐层merge sstable文件
+
+避免一次读请求读取太多的sstables---读放大
+避免一些临时数据(deleted/overwritten/expired)在磁盘上停留时间过长
+避免磁盘上临时空间过大----空间放大
+避免compact相同的数据太多次----写放大
+
+
+在Leveled compaction中，所有的SSTables被分为很多levels(level0/1/2/3…).
+最新的SSTable(从memtable中刷新下来的)是属于Level0
+  每一个SSTable都是有序的
+  只有Level0的SSTable允许overlap
+除了level0之外其他的level的总的SSTable大小有一个最大的限制
+  通过level_compaction_dynamic_level_bytes来计算
+在Level0，如果积攒够了足够的(level0_file_num_compaction_trigger)SSTable,则就会进行compact.
+  一般来说会把全部的SSTables compact到下一个level(Level1).
+  不会写一个很大的SSTable,
+一般来说百分之90的空间都是给最后一级level的.
+
+参考:http://mysql.taobao.org/monthly/2018/10/08/
+*/
 class Compaction {
  public:
   Compaction(VersionStorageInfo* input_version,
