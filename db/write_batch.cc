@@ -296,10 +296,6 @@ bool WriteBatch::HasRollback() const {
   return (ComputeContentFlags() & ContentFlags::HAS_ROLLBACK) != 0;
 }
 
-/*
-²åÈëÊı¾İÊ±£ºtype£¨kTypeValue¡¢kTypeDeletion£©£¬Key_size£¬Key£¬Value_size£¬Value
-É¾³ıÊı¾İÊ±£ºtype£¨kTypeValue¡¢kTypeDeletion£©£¬Key_size£¬Key
-*/ //¶ÔKV recordÄÚÈİ×ö¼ì²é
 Status ReadRecordFromWriteBatch(Slice* input, char* tag,
                                 uint32_t* column_family, Slice* key,
                                 Slice* value, Slice* blob, Slice* xid) {
@@ -308,12 +304,21 @@ Status ReadRecordFromWriteBatch(Slice* input, char* tag,
   input->remove_prefix(1);
   *column_family = 0;  // default
   switch (*tag) {
+/** comment by hy 2020-06-28
+ * # æ’å…¥æ•°æ®æ—¶ï¼štypeï¼ˆkTypeValueã€kTypeDeletionï¼‰
+                 Key_sizeï¼ŒKeyï¼ŒValue_sizeï¼ŒValue
+     åˆ é™¤æ•°æ®æ—¶ï¼štypeï¼ˆkTypeValueã€kTypeDeletionï¼‰
+                 Key_sizeï¼ŒKey
+ */
     case kTypeColumnFamilyValue:
       if (!GetVarint32(input, column_family)) {
         return Status::Corruption("bad WriteBatch Put");
       }
       FALLTHROUGH_INTENDED;
     case kTypeValue:
+/** comment by hy 2020-06-28
+ * # å¯¹KV recordå†…å®¹åšæ£€æŸ¥
+ */
       if (!GetLengthPrefixedSlice(input, key) ||
           !GetLengthPrefixedSlice(input, value)) {
         return Status::Corruption("bad WriteBatch Put");
@@ -400,20 +405,18 @@ Status ReadRecordFromWriteBatch(Slice* input, char* tag,
   return Status::OK();
 }
 
-/* 
-memtable insert¶ÑÕ»ĞÅÏ¢:
-#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
-#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
-#2  rocksdb::MemTable::Add
-#3  rocksdb::MemTableInserter::PutCF
-#4  rocksdb::WriteBatch::Iterate
-#5  rocksdb::WriteBatch::Iterate
-#6  rocksdb::WriteBatchInternal::InsertInto
-#7  rocksdb::DBImpl::WriteImpl
-#8  rocksdb::DBImpl::Write 
-*/
+/*****************************************************************************
+ * å‡½ æ•° å  : WriteBatch.Iterate
+ * è´Ÿ è´£ äºº  : hy
+ * åˆ›å»ºæ—¥æœŸ  : 2020å¹´6æœˆ28æ—¥
+ * å‡½æ•°åŠŸèƒ½  :  
+ * è¾“å…¥å‚æ•°  : Handler* handler : MemTableInserter
+ * è¾“å‡ºå‚æ•°  : æ— 
+ * è¿” å› å€¼  : Status
+ * è°ƒç”¨å…³ç³»  : 
+ * å…¶    å®ƒ  : 
 
-//Ğ´memtableµÄhandlerÎªMemTableInserter
+*****************************************************************************/
 Status WriteBatch::Iterate(Handler* handler) const {
   Slice input(rep_);
   if (input.size() < WriteBatchInternal::kHeader) {
@@ -430,7 +433,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
   int found = 0;
   Status s;
   char tag = 0;
-  uint32_t column_family = 0;  // default
+  uint32_t column_family = 0;
   bool last_was_try_again = false;
   bool handler_continue = true;
   while (((s.ok() && !input.empty()) || UNLIKELY(s.IsTryAgain()))) {
@@ -444,8 +447,8 @@ Status WriteBatch::Iterate(Handler* handler) const {
       tag = 0;
       column_family = 0;  // default
 /** comment by hy 2020-06-13
- * # ´ÓbatchÖĞ¶ÁÈ¡Êı¾İ
-     ¶ÔKV recordÄÚÈİ×ö¼ì²é
+ * # ä»batchä¸­è¯»å–æ•°æ®
+     å¯¹KV recordå†…å®¹åšæ£€æŸ¥
  */
       s = ReadRecordFromWriteBatch(&input, &tag, &column_family, &key, &value,
                                    &blob, &xid);
@@ -464,7 +467,7 @@ Status WriteBatch::Iterate(Handler* handler) const {
       s = Status::OK();
     }
 /** comment by hy 2020-06-13
- * # ¸ù¾İ²Ù×÷ÀàĞÍ½øĞĞ²»Í¬µÄĞ´Èë
+ * # æ ¹æ®æ“ä½œç±»å‹è¿›è¡Œä¸åŒçš„å†™å…¥
      handler = MemTableInserter
  */
     switch (tag) {
@@ -472,7 +475,9 @@ Status WriteBatch::Iterate(Handler* handler) const {
       case kTypeValue:
         assert(content_flags_.load(std::memory_order_relaxed) &
                (ContentFlags::DEFERRED | ContentFlags::HAS_PUT));
-		//MemTableInserter::PutCF
+/** comment by hy 2020-06-28
+ * # MemTableInserter::PutCF
+ */
         s = handler->PutCF(column_family, key, value);
         if (LIKELY(s.ok())) {
           empty_batch = false;
@@ -650,16 +655,16 @@ size_t WriteBatchInternal::GetFirstOffset(WriteBatch* /*b*/) {
 }
 
 /*
-RocksDBµÄĞ´Èë¹ı³Ì·Ö³ÉÒÔÏÂÈı²½£º
-1.½«Ò»Ìõ»òÕß¶àÌõ²Ù×÷µÄ¼ÇÂ¼·â×°µ½WriteBatch
-2.½«¼ÇÂ¼¶ÔÓ¦µÄÈÕÖ¾Ğ´µ½WALÎÄ¼şÖĞ
-3.½«WriteBatchÖĞµÄÒ»Ìõ»òÕß¶àÌõ¼ÇÂ¼Ğ´µ½ÄÚ´æÖĞµÄmemtableÖĞ
+RocksDBçš„å†™å…¥è¿‡ç¨‹åˆ†æˆä»¥ä¸‹ä¸‰æ­¥ï¼š
+1.å°†ä¸€æ¡æˆ–è€…å¤šæ¡æ“ä½œçš„è®°å½•å°è£…åˆ°WriteBatch
+2.å°†è®°å½•å¯¹åº”çš„æ—¥å¿—å†™åˆ°WALæ–‡ä»¶ä¸­
+3.å°†WriteBatchä¸­çš„ä¸€æ¡æˆ–è€…å¤šæ¡è®°å½•å†™åˆ°å†…å­˜ä¸­çš„memtableä¸­
 
-  ÆäÖĞ£¬Ã¿¸öWriteBatch´ú±íÒ»¸öÊÂÎñ£¬¿ÉÒÔ°üº¬¶àÌõ²Ù×÷£¬¿ÉÒÔÍ¨¹ıµ÷ÓÃWriteBatch::Put/DeleteµÈ²Ù×÷
-½«¶ÔÓ¦¶àÌõµÄkey/value¼ÇÂ¼¼ÓÈëWriteBatchÖĞ¡£
+  å…¶ä¸­ï¼Œæ¯ä¸ªWriteBatchä»£è¡¨ä¸€ä¸ªäº‹åŠ¡ï¼Œå¯ä»¥åŒ…å«å¤šæ¡æ“ä½œï¼Œå¯ä»¥é€šè¿‡è°ƒç”¨WriteBatch::Put/Deleteç­‰æ“ä½œ
+å°†å¯¹åº”å¤šæ¡çš„key/valueè®°å½•åŠ å…¥WriteBatchä¸­ã€‚
 */
 
-//WriteBatch::Put WriteBatch::Put   key-valueÌî³äµ½WriteBatch
+//WriteBatch::Put WriteBatch::Put   key-valueå¡«å……åˆ°WriteBatch
 Status WriteBatchInternal::Put(WriteBatch* b, uint32_t column_family_id,
                                const Slice& key, const Slice& value) {
   if (key.size() > size_t{port::kMaxUint32}) {
@@ -671,7 +676,7 @@ Status WriteBatchInternal::Put(WriteBatch* b, uint32_t column_family_id,
 
   LocalSavePoint save(b);
   WriteBatchInternal::SetCount(b, WriteBatchInternal::Count(b) + 1);
-  //Ìî³äÀàĞÍ
+  //å¡«å……ç±»å‹
   if (column_family_id == 0) {
     b->rep_.push_back(static_cast<char>(kTypeValue));
   } else {
@@ -687,14 +692,14 @@ Status WriteBatchInternal::Put(WriteBatch* b, uint32_t column_family_id,
 }
 
 /*
-RocksDBµÄĞ´Èë¹ı³Ì·Ö³ÉÒÔÏÂÈı²½£º
-1.½«Ò»Ìõ»òÕß¶àÌõ²Ù×÷µÄ¼ÇÂ¼·â×°µ½WriteBatch
-2.½«¼ÇÂ¼¶ÔÓ¦µÄÈÕÖ¾Ğ´µ½WALÎÄ¼şÖĞ
-3.½«WriteBatchÖĞµÄÒ»Ìõ»òÕß¶àÌõ¼ÇÂ¼Ğ´µ½ÄÚ´æÖĞµÄmemtableÖĞ
+RocksDBçš„å†™å…¥è¿‡ç¨‹åˆ†æˆä»¥ä¸‹ä¸‰æ­¥ï¼š
+1.å°†ä¸€æ¡æˆ–è€…å¤šæ¡æ“ä½œçš„è®°å½•å°è£…åˆ°WriteBatch
+2.å°†è®°å½•å¯¹åº”çš„æ—¥å¿—å†™åˆ°WALæ–‡ä»¶ä¸­
+3.å°†WriteBatchä¸­çš„ä¸€æ¡æˆ–è€…å¤šæ¡è®°å½•å†™åˆ°å†…å­˜ä¸­çš„memtableä¸­
 
-  ÆäÖĞ£¬Ã¿¸öWriteBatch´ú±íÒ»¸öÊÂÎñ£¬¿ÉÒÔ°üº¬¶àÌõ²Ù×÷£¬¿ÉÒÔÍ¨¹ıµ÷ÓÃWriteBatch::Put/DeleteµÈ²Ù×÷
-½«¶ÔÓ¦¶àÌõµÄkey/value¼ÇÂ¼¼ÓÈëWriteBatchÖĞ¡£
-²Î¿¼https://cloud.tencent.com/developer/article/1143439
+  å…¶ä¸­ï¼Œæ¯ä¸ªWriteBatchä»£è¡¨ä¸€ä¸ªäº‹åŠ¡ï¼Œå¯ä»¥åŒ…å«å¤šæ¡æ“ä½œï¼Œå¯ä»¥é€šè¿‡è°ƒç”¨WriteBatch::Put/Deleteç­‰æ“ä½œ
+å°†å¯¹åº”å¤šæ¡çš„key/valueè®°å½•åŠ å…¥WriteBatchä¸­ã€‚
+å‚è€ƒhttps://cloud.tencent.com/developer/article/1143439
 */
 //DB::Put
 Status WriteBatch::Put(ColumnFamilyHandle* column_family, const Slice& key,
@@ -810,7 +815,7 @@ Status WriteBatchInternal::MarkRollback(WriteBatch* b, const Slice& xid) {
 Status WriteBatchInternal::Delete(WriteBatch* b, uint32_t column_family_id,
                                   const Slice& key) {
 /** comment by hy 2020-06-13
- * # ±£´æµã
+ * # ä¿å­˜ç‚¹
  */
   LocalSavePoint save(b);
   WriteBatchInternal::SetCount(b, WriteBatchInternal::Count(b) + 1);
@@ -1041,8 +1046,8 @@ Status WriteBatch::PutLogData(const Slice& blob) {
   return save.commit();
 }
 
-//ÊÂÎñµÄSetSavePointºÍRollbackToSavePointÒ²ÊÇÍ¨¹ıWriteBatchÀ´ÊµÏÖµÄ£¬SetSavePoint¼ÇÂ¼µ±Ç°WriteBatchµÄ´ó
-//Ğ¡¼°Í³¼ÆĞÅÏ¢£¬Èô¸É²Ù×÷Ö®ºó£¬ÈôÏë»Ø¹ö£¬ÔòÖ»ĞèÒª½«WriteBatch truncateµ½Ö®Ç°¼ÇÂ¼µÄ´óĞ¡²¢»Ö¸´Í³¼ÆĞÅÏ¢¼´¿É¡£
+//äº‹åŠ¡çš„SetSavePointå’ŒRollbackToSavePointä¹Ÿæ˜¯é€šè¿‡WriteBatchæ¥å®ç°çš„ï¼ŒSetSavePointè®°å½•å½“å‰WriteBatchçš„å¤§
+//å°åŠç»Ÿè®¡ä¿¡æ¯ï¼Œè‹¥å¹²æ“ä½œä¹‹åï¼Œè‹¥æƒ³å›æ»šï¼Œåˆ™åªéœ€è¦å°†WriteBatch truncateåˆ°ä¹‹å‰è®°å½•çš„å¤§å°å¹¶æ¢å¤ç»Ÿè®¡ä¿¡æ¯å³å¯ã€‚
 //TransactionBaseImpl::SetSavePoint
 void WriteBatch::SetSavePoint() {
   if (save_points_ == nullptr) {
@@ -1053,8 +1058,8 @@ void WriteBatch::SetSavePoint() {
       GetDataSize(), Count(), content_flags_.load(std::memory_order_relaxed)));
 }
 
-//ÊÂÎñµÄSetSavePointºÍRollbackToSavePointÒ²ÊÇÍ¨¹ıWriteBatchÀ´ÊµÏÖµÄ£¬SetSavePoint¼ÇÂ¼µ±Ç°WriteBatchµÄ´ó
-//Ğ¡¼°Í³¼ÆĞÅÏ¢£¬Èô¸É²Ù×÷Ö®ºó£¬ÈôÏë»Ø¹ö£¬ÔòÖ»ĞèÒª½«WriteBatch truncateµ½Ö®Ç°¼ÇÂ¼µÄ´óĞ¡²¢»Ö¸´Í³¼ÆĞÅÏ¢¼´¿É¡£
+//äº‹åŠ¡çš„SetSavePointå’ŒRollbackToSavePointä¹Ÿæ˜¯é€šè¿‡WriteBatchæ¥å®ç°çš„ï¼ŒSetSavePointè®°å½•å½“å‰WriteBatchçš„å¤§
+//å°åŠç»Ÿè®¡ä¿¡æ¯ï¼Œè‹¥å¹²æ“ä½œä¹‹åï¼Œè‹¥æƒ³å›æ»šï¼Œåˆ™åªéœ€è¦å°†WriteBatch truncateåˆ°ä¹‹å‰è®°å½•çš„å¤§å°å¹¶æ¢å¤ç»Ÿè®¡ä¿¡æ¯å³å¯ã€‚
 Status WriteBatch::RollbackToSavePoint() {
   if (save_points_ == nullptr || save_points_->stack.size() == 0) {
     return Status::NotFound();
@@ -1092,7 +1097,6 @@ Status WriteBatch::PopSavePoint() {
   return Status::OK();
 }
 
-//MemTableInserter£¬°ÑKV recordĞ´ÈëÄÚ´æ
 class MemTableInserter : public WriteBatch::Handler {
 
   SequenceNumber sequence_;
@@ -1308,7 +1312,7 @@ class MemTableInserter : public WriteBatch::Handler {
     assert(!seq_per_batch_ || !moptions->inplace_update_support);
     if (!moptions->inplace_update_support) {
 /** comment by hy 2020-06-13
- * # ·ÅÈë memtable Êı¾İ
+ * # æ”¾å…¥ memtable æ•°æ®
  */
       bool mem_res =
           mem->Add(sequence_, value_type, key, value,
@@ -1385,7 +1389,7 @@ class MemTableInserter : public WriteBatch::Handler {
   }
 
   /* 
-  memtable insert¶ÑÕ»ĞÅÏ¢:
+  memtable insertå †æ ˆä¿¡æ¯:
 #0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
 #1  rocksdb::(anonymous namespace)::SkipListRep::Insert
 #2  rocksdb::MemTable::Add
@@ -1663,15 +1667,15 @@ class MemTableInserter : public WriteBatch::Handler {
   }
 
   /*
-checkmemtablefull»áÔÚÏÂÃæÈıÖÖÌõ¼şÏÂ±»µ÷ÓÃ
+checkmemtablefullä¼šåœ¨ä¸‹é¢ä¸‰ç§æ¡ä»¶ä¸‹è¢«è°ƒç”¨
 
-delete²Ù×÷
-put²Ù×÷
-merge²Ù×÷.
+deleteæ“ä½œ
+putæ“ä½œ
+mergeæ“ä½œ.
   */
 
-  //Õâ¸öº¯ÊıÖ÷ÒªÓÃÀ´½«ÒÑ¾­ÉèÖÃflush_state_Îªflush_requestedµÄmemtableµÄ
-  //×´Ì¬¸Ä±äÎªflush_schedule(ÒâË¼¾ÍÊÇÒÑ¾­½øÈëflushµÄµ÷¶È¶ÓÁĞ),È»ºó½«Õâ¸öcolumnfamily¼ÓÈëµ½¶ÔÓ¦µÄµ÷¶È¶ÓÁĞ.
+  //è¿™ä¸ªå‡½æ•°ä¸»è¦ç”¨æ¥å°†å·²ç»è®¾ç½®flush_state_ä¸ºflush_requestedçš„memtableçš„
+  //çŠ¶æ€æ”¹å˜ä¸ºflush_schedule(æ„æ€å°±æ˜¯å·²ç»è¿›å…¥flushçš„è°ƒåº¦é˜Ÿåˆ—),ç„¶åå°†è¿™ä¸ªcolumnfamilyåŠ å…¥åˆ°å¯¹åº”çš„è°ƒåº¦é˜Ÿåˆ—.
   void CheckMemtableFull() {
     if (flush_scheduler_ != nullptr) {
       auto* cfd = cf_mems_->current();
@@ -1838,7 +1842,7 @@ merge²Ù×÷.
 // 3) During Write(), in a concurrent context where memtables has been cloned
 // The reason is that it calls memtables->Seek(), which has a stateful cache
 /* 
-memtable insert¶ÑÕ»ĞÅÏ¢:
+memtable insertå †æ ˆä¿¡æ¯:
 #0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
 #1  rocksdb::(anonymous namespace)::SkipListRep::Insert
 #2  rocksdb::MemTable::Add
@@ -1858,7 +1862,7 @@ Status WriteBatchInternal::InsertInto(
       sequence, memtables, flush_scheduler, ignore_missing_column_families,
       recovery_log_number, db, concurrent_memtable_writes,
       nullptr /*has_valid_writes*/, seq_per_batch, batch_per_txn);
-  for (auto w : write_group) { //w¶ÔÓ¦ÎªWriteThread::Writer
+  for (auto w : write_group) { //wå¯¹åº”ä¸ºWriteThread::Writer
     if (w->CallbackFailed()) {
       continue;
     }
@@ -1870,7 +1874,7 @@ Status WriteBatchInternal::InsertInto(
     }
     SetSequence(w->batch, inserter.sequence());
     inserter.set_log_number_ref(w->log_ref);
-	//WriteBatch::Iterate   Iterate¶ÔÓ¦MemTableInserter£¬°Ñrecored¼ÇÂ¼Ğ´ÈëÄÚ´æ
+	//WriteBatch::Iterate   Iterateå¯¹åº”MemTableInserterï¼ŒæŠŠrecoredè®°å½•å†™å…¥å†…å­˜
     w->status = w->batch->Iterate(&inserter);
     if (!w->status.ok()) {
       return w->status;
@@ -1881,17 +1885,6 @@ Status WriteBatchInternal::InsertInto(
   return Status::OK();
 }
 
-/*
-#0  rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
-#1  rocksdb::(anonymous namespace)::SkipListRep::Insert
-#2  rocksdb::MemTable::Add
-#3  rocksdb::MemTableInserter::PutCF
-#4  rocksdb::WriteBatch::Iterate
-#5  rocksdb::WriteBatch::Iterate
-#6  rocksdb::WriteBatchInternal::InsertInto
-#7  rocksdb::DBImpl::WriteImpl
-#8  rocksdb::DBImpl::Write 
-*/
 Status WriteBatchInternal::InsertInto(
     WriteThread::Writer* writer, SequenceNumber sequence,
     ColumnFamilyMemTables* memtables, FlushScheduler* flush_scheduler,
@@ -1902,6 +1895,12 @@ Status WriteBatchInternal::InsertInto(
   (void)batch_cnt;
 #endif
   assert(writer->ShouldWriteToMemtable());
+/** comment by hy 2020-06-28
+ * # æ’å…¥å™¨é€‰æ‹©
+     å¦‚
+     rocksdb::InlineSkipList<rocksdb::MemTableRep::KeyComparator const&>::Insert
+     rocksdb::(anonymous namespace)::SkipListRep::Insert
+ */
   MemTableInserter inserter(
       sequence, memtables, flush_scheduler, ignore_missing_column_families,
       log_number, db, concurrent_memtable_writes, nullptr /*has_valid_writes*/,
@@ -1909,6 +1908,10 @@ Status WriteBatchInternal::InsertInto(
   SetSequence(writer->batch, sequence);
   inserter.set_log_number_ref(writer->log_ref);
   // rocksdb::WriteBatch::Iterate
+/** comment by hy 2020-06-28
+ * # rocksdb::WriteBatch::Iterate
+     è¿™é‡Œæ ¹æ® inserter é€‰æ‹©å¯¹åº”çš„æ–¹æ³•
+ */
   Status s = writer->batch->Iterate(&inserter);
   assert(!seq_per_batch || batch_cnt != 0);
   assert(!seq_per_batch || inserter.sequence() - sequence == batch_cnt);
@@ -1925,14 +1928,14 @@ Status WriteBatchInternal::InsertInto(
     SequenceNumber* next_seq, bool* has_valid_writes, bool seq_per_batch,
     bool batch_per_txn) {
 /** comment by hy 2020-06-13
- * # ¹¹ÔìÒ»¸öMemtableµÄInserter
+ * # æ„é€ ä¸€ä¸ªMemtableçš„Inserter
  */
   MemTableInserter inserter(Sequence(batch), memtables, flush_scheduler,
                             ignore_missing_column_families, log_number, db,
                             concurrent_memtable_writes, has_valid_writes,
                             seq_per_batch, batch_per_txn);
 /** comment by hy 2020-06-13
- * # ¶ÔMemtable½øĞĞĞ´Èë²Ù×÷
+ * # å¯¹Memtableè¿›è¡Œå†™å…¥æ“ä½œ
      WriteBatch::Iterate
  */
   Status s = batch->Iterate(&inserter);

@@ -57,13 +57,9 @@ uint8_t WriteThread::BlockingAwaitState(Writer* w, uint8_t goal_mask) {
   return state;
 }
 
-/*
-条件锁因为Context Switches而代价高昂，rocksdb通过一系列优化来尽量少用条件锁的使用
-并且尽可能的减少Context Switches。它将leveldb简单一条pthread_cond_wait拆成3步来做:
-1. Loop
-2. Short-Wait: Loop + std::this_thread::yield()
-3. Long-Wait: std::condition_variable::wait()
-*/ //其他线程通过SetState(w, goal_mask)来唤醒本线程
+/** comment by hy 2020-06-29
+ * # 其他线程通过SetState(w, goal_mask)来唤醒本线程
+ */
 uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
                                 AdaptationContext* ctx) {
   uint8_t state;
@@ -76,22 +72,31 @@ uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
   // is the effect of the pause instruction), so 200 iterations is a bit
   // more than a microsecond.  This is long enough that waits longer than
   // this can amortize the cost of accessing the clock and yielding.
-  //通过循环忙等待一段有限的时间，大约1us，绝大多数的情况下，
-  //这1us的忙等足以让state条件满足（Leader Writer的WriteBatch执行完），
-  //而忙等待是占着CPU，不会发生Context Switches，这就减小了额外开销；
+/** comment by hy 2020-06-29
+ * # 条件锁因为 上下文切换 而代价高昂
+     一条pthread_cond_wait拆成3步来做
+     1. Loop
+     2. Short-Wait: Loop + std::this_thread::yield()
+     3. Long-Wait: std::condition_variable::wait()
+*/
+/** comment by hy 2020-06-29
+ * # 通过循环忙等待一段有限的时间，大约1us，绝大多数的情况下
+     这1us的忙等足以让state条件满足
+     而忙等待是占着CPU，不会发生Context Switches，这就减小了额外开销
+ */
   for (uint32_t tries = 0; tries < 200; ++tries) {
     state = w->state.load(std::memory_order_acquire);
     if ((state & goal_mask) != 0) {
       return state;
     }
 
-	/*
-	发现上面的200次循环中每次都会load state变量，检查是否符合条件，
-	当Leader Writer的WriteBatch执行完，修改了这个state变量时，会产生store指令，
-	由于处理器是乱序执行的，当有了store指令后，需要重排流水线确保在store之后的
-	load指令在执行store之后再执行，而重排会带来25倍左右的性能损失。pause指令其
-	实就是延迟40左右个clock，这样可以尽可能减少流水线上的load指令，减少重排代价。
-	*/
+/** comment by hy 2020-06-29
+ * # 发现上面的200次循环中每次都会load state变量，检查是否符合条件
+     当Leader Writer的WriteBatch执行完，修改了这个state变量时，会产生store指令
+     load指令在执行store之后再执行，而重排会带来25倍左右的性能损失。
+     pause指令其实就是延迟40左右个clock
+     这样可以尽可能减少流水线上的load指令，减少重排代价
+ */
     port::AsmVolatilePause();
   }
 
@@ -155,27 +160,21 @@ uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
   // 1/sampling_base.
   const int sampling_base = 256;
 
-  /*
-  循环判断state条件是否满足，满足则跳出循环，不满足则std::this_thread::yield()来
-  主动让出时间片，这里的循环不是无止境的，最多持续max_yield_usec_ us（默认0us，需
-  要用enable_write_thread_adaptive_yield=true来打开，打开后默认是100us）。这么做
-  是可取的，因为yield并不一定会发生Context Switches，如果线程数小于CPU的core数, 
-  也就是每个core上只有一个线程的时候，是不会发生Context Switches，花费差不多不到1us。
-  不同于Loop每次固定循环200次，Short-Wait循环的上限是100us，这100us使用CPU的高占用
-  (involuntary context switches)来换取rocksdb可能的高吞吐，如果很不幸每次100us后state
-  还没有满足条件而进去最后的Long-Wait，那么这100us做了很多无谓的Context Switches，
-  消耗了CPU。有没有什么办法来动态判断在Short-Wait中是否需要break出循环直接进行Long-Wait呢？
-  rocksdb是通过yield的持续时长来做的调整，如果yield前后间隔大于3us，并且累计3次，则认为yield
-  已经慢到足够可以通过直接Long-Wait来等待而不用进行无谓的yield。
-  */
-
-  /*
-  首先max_yield_usec_大于0，其次update_ctx等于true（1/256的概率）或者ctx->value大于0；
-  ctx->value就是这个动态的开关，如果在Short-Wait中成功等到state条件满足，则增加value，
-  如果Short-Wait没有成功等到条件满足而最终还是靠Long-Wait来等待，则减少这个value，然
-  后通过它是否大于0来决定下次是否需要进行Short-Wait，可以看到，如果Short-Wait大量命中，
-  则value一定会远大于0，每次都进行Short-Wait。
-  */
+/** comment by hy 2020-06-29
+ * # 循环判断state条件是否满足，满足则跳出循环
+     不满足则std::this_thread::yield()来主动让出时间片
+     最多持续max_yield_usec_ us（默认0us，
+     需要用enable_write_thread_adaptive_yield=true来打开
+     打开后默认是100us
+     不同于Loop每次固定循环200次，Short-Wait循环的上限是100us
+     这100us使用CPU的高占用
+     rocksdb是通过yield的持续时长来做的调整
+     如果yield前后间隔大于3us，并且累计3次，则认为yield
+     已经慢到足够可以通过直接Long-Wait来等待而不用进行无谓的yield
+ */
+/** comment by hy 2020-06-29
+ * # 首先max_yield_usec_大于0
+ */
   if (max_yield_usec_ > 0) {
     update_ctx = Random::GetTLSInstance()->OneIn(sampling_base);
 
@@ -190,6 +189,12 @@ uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
       size_t slow_yield_count = 0;
 
       auto iter_begin = spin_begin;
+/** comment by hy 2020-06-29
+ * # Short-Wait循环的上限是100us
+     这100us使用CPU的高占用
+     rocksdb是通过yield的持续时长来做的调整
+ */
+ */
       while ((iter_begin - spin_begin) <=
              std::chrono::microseconds(max_yield_usec_)) {
         std::this_thread::yield();
@@ -202,6 +207,10 @@ uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
         }
 
         auto now = std::chrono::steady_clock::now();
+/** comment by hy 2020-06-29
+ * # rocksdb是通过yield的持续时长来做的调整
+     如果yield前后间隔大于3us，并且累计3次，则认为yield
+ */
         if (now == iter_begin ||
             now - iter_begin >= std::chrono::microseconds(slow_yield_usec_)) {
           // conservatively count it as a slow yield if our clock isn't
@@ -219,12 +228,20 @@ uint8_t WriteThread::AwaitState(Writer* w, uint8_t goal_mask,
     }
   }
 
-  //很不幸，前两步的尝试都没有等到条件满足，只能通过代价最高的std::condition_variable::wait()来做
+/** comment by hy 2020-06-29
+ * # 已经慢到足够可以通过直接Long-Wait来等待而不用进行无谓的yield
+     前两步的尝试都没有等到条件满足
+     只能通过代价最高的std::condition_variable::wait
+ */
   if ((state & goal_mask) == 0) {
     TEST_SYNC_POINT_CALLBACK("WriteThread::AwaitState:BlockingWaiting", w);
     state = BlockingAwaitState(w, goal_mask);
   }
 
+/** comment by hy 2020-06-29
+ * # update_ctx等于true（1/256的概率）或者ctx->value大于0
+     在Short-Wait中成功等到state条件满足，则增加value
+  */
   if (update_ctx) {
     // Since our update is sample based, it is ok if a thread overwrites the
     // updates by other threads. Thus the update does not have to be atomic.
@@ -259,13 +276,12 @@ void WriteThread::SetState(Writer* w, uint8_t new_state) {
 }
 
 
-//WriteThread::JoinBatchGroup
-//把新的w和newest_writer通过链表链接在一起
 bool WriteThread::LinkOne(Writer* w, std::atomic<Writer*>* newest_writer) {
   assert(newest_writer != nullptr);
   assert(w->state == STATE_INIT);
-  //主要用来将当前的Writer对象加入到group中，这里可以看到由于 
-  //写入是并发的因此对应的newest_writer_(保存最新的写入对象)需要原子操作来更新.
+/** comment by hy 2020-06-28
+ * # 写入是并发的因此对应的newest_writer_(保存最新的写入对象)需要原子操作来更新
+ */
   Writer* writers = newest_writer->load(std::memory_order_relaxed);
   while (true) {
     // If write stall in effect, and w->no_slowdown is not true,
@@ -291,11 +307,19 @@ bool WriteThread::LinkOne(Writer* w, std::atomic<Writer*>* newest_writer) {
       }
     }
 
-	//通过link_older让w和newest_writer建立关联，链接在一起
+/** comment by hy 2020-06-28
+ * # 主要用来将当前的Writer对象加入到group中
+     通过link_older让w和newest_writer建立关联，链接在一起
+ */
     w->link_older = writers;
-	//newest_writer指向新的w
+/** comment by hy 2020-06-28
+ * # newest_writer指向新的w
+ */
     if (newest_writer->compare_exchange_weak(writers, w)) {
-      return (writers == nullptr); //说明w是第一个进来的，可以作为leader
+/** comment by hy 2020-06-28
+ * # 说明w是第一个进来的，可以作为leader
+ */
+      return (writers == nullptr);
     }
   }
 }
@@ -410,51 +434,58 @@ void WriteThread::EndWriteStall() {
   stall_cv_.SignalAll();
 }
 
-//DBImpl::PipelinedWriteImpl
 static WriteThread::AdaptationContext jbg_ctx("JoinBatchGroup");
 
-//可以参考下http://mysql.taobao.org/monthly/2017/07/05/
-//一个WriteThread::Writer代表一个写线程，和一个WriteBatch(代表这个线程要写的数据)关联，多个线程同时写，就会有多个线程同时走到该函数中，
-//生成多个一个WriteThread::Writer,这多个WriteThread::Writer通过JoinBatchGroup组织成链表结构，参考DBImpl::WriteImpl
+/*****************************************************************************
+ * 函 数 名  : rocksdb.WriteThread.JoinBatchGroup
+ * 负 责 人  : hy
+ * 创建日期  : 2020年6月28日
+ * 函数功能  :  
+ * 输入参数  : Writer* w  代表一个写线程,与和一个WriteBatch
+ * 输出参数  : 无
+ * 返 回 值  : void
+ * 调用关系  : 
+ * 其    它  : 
 
-//follower线程在WriteThread::JoinBatchGroup中等待被唤醒,
-//leader在LaunchParallelMemTableWriters中唤醒follower线程
-
-
-//这个函数主要是用来将所有的写入WAL加入到一个Group中.这里可以看到当当前的Writer 
-//对象是leader(比如第一个进入的对象)的时候将会直接返回，否则将会等待知道更新为对应的状态．
+*****************************************************************************/
 void WriteThread::JoinBatchGroup(Writer* w) {
   TEST_SYNC_POINT_CALLBACK("WriteThread::JoinBatchGroup:Start", w);
   assert(w->batch != nullptr);
 
-  //把新的w和newest_writer通过链表链接在一起
+/** comment by hy 2020-06-28
+ * # 把新的w和newest_writer通过链表链接在一起
+     原来的保留到老指针中,
+     返回当前是不是 leader
+ */
   bool linked_as_leader = LinkOne(w, &newest_writer_);
 
   if (linked_as_leader) {
-  	//w设置为leader
+/** comment by hy 2020-06-28
+ * # w设置为leader
+ */
     SetState(w, STATE_GROUP_LEADER);
   }
 
   TEST_SYNC_POINT_CALLBACK("WriteThread::JoinBatchGroup:Wait", w);
-  //如果是leader，直接返回
+/** comment by hy 2020-06-28
+ * # 如果是leader，直接返回
+     不是则等候 leader
+ */
   if (!linked_as_leader) {
-    /**
-     * Wait util:
-     * 1) An existing leader pick us as the new leader when it finishes
-     * 2) An existing leader pick us as its follewer and
-     * 2.1) finishes the memtable writes on our behalf
-     * 2.2) Or tell us to finish the memtable writes in pralallel
-     * 3) (pipelined write) An existing leader pick us as its follower and
-     *    finish book-keeping and WAL write for us, enqueue us as pending
-     *    memtable writer, and
-     * 3.1) we become memtable writer group leader, or
-     * 3.2) an existing memtable writer group leader tell us to finish memtable
-     *      writes in parallel.
-     */
     TEST_SYNC_POINT_CALLBACK("WriteThread::JoinBatchGroup:BeganWaiting", w);
-	//follower线程在WriteThread::JoinBatchGroup中等待被唤醒,
-	//leader在LaunchParallelMemTableWriters中唤醒follower线程
-	//等待被唤醒，其他地方通过SetState(w, stat)来唤醒该w对应的写线程，stat为下面这几种状态
+/** comment by hy 2020-06-28
+ * # follower线程在WriteThread::JoinBatchGroup中等待被唤醒
+     唤醒条件通过 SetState(w, stat)来唤醒该
+     等待条件如下:
+     又选为 leader
+     STATE_GROUP_LEADER
+     已经完成 memtable 的写
+     STATE_MEMTABLE_WRITER_LEADER
+     STATE_PARALLEL_MEMTABLE_WRITER
+
+     STATE_COMPLETED
+     
+ */
     AwaitState(w, STATE_GROUP_LEADER | STATE_MEMTABLE_WRITER_LEADER |
                       STATE_PARALLEL_MEMTABLE_WRITER | STATE_COMPLETED,
                &jbg_ctx);
@@ -462,11 +493,6 @@ void WriteThread::JoinBatchGroup(Writer* w) {
   }
 }
 
-//DBImpl::PipelinedWriteImpl   DBImpl::WriteImpl
-//把此leader下的所有的write都链接到一个WriteGroup中(调用EnterAsBatchGroupLeader函数),　并开始写入WAL
-//由leader线程构造一个WriteGroup对象的实例，WriteGroup对象的实例用于描述当作Group Commit要写入WAL的所有内容。
-
-//获取该leader及其下面所有follower的Writer对应的WriteBatch数据总长度
 size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
                                             WriteGroup* write_group) { 
   assert(leader->link_older == nullptr);
@@ -478,8 +504,11 @@ size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
   // Allow the group to grow up to a maximum size, but if the
   // original write is small, limit the growth so we do not slow
   // down the small write too much.
-  //确定本批次要提交的最大长度max_size。如果leader线程要写入WAL的记录长度大于128k，
-  //则本次max_size为1MB；如果leader的记录长度小于128k, 则max_size为leader的记录长度+128k。
+/** comment by hy 2020-06-28
+ * # 确定本批次要提交的最大长度max_size
+     要写入WAL的记录长度大于128k则本次max_size为1MB
+     小于128k, 则max_size为leader的记录长度+128k
+ */
   size_t max_size = 1 << 20;
   if (size <= (128 << 10)) {
     max_size = size + (128 << 10);
@@ -496,19 +525,26 @@ size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
   // (they emptied the list and then we added ourself as leader) or had to
   // explicitly wake us up (the list was non-empty when we added ourself,
   // so we have already received our MarkJoined).
-  //找到当前链表中最新的Write实例newestwriter，通过调用CreateMissingNewerLinks(newest_writer)，
-  //将整个链表的链接成一个双向链表。
+/** comment by hy 2020-06-28
+ * # 找到当前链表中最新的Write实例newestwriter
+     通过调用CreateMissingNewerLinks(newest_writer)
+     将整个链表的链接成一个双向链表
+     将符合的最后的一个write记录到WriteGroup::last_write中
+ */
   CreateMissingNewerLinks(newest_writer);
 
   // Tricky. Iteration start (leader) is exclusive and finish
   // (newest_writer) is inclusive. Iteration goes from old to new.
-  //从leader所在的Write开始遍历，直至newestwrite。累加每个writer的size，
-  //超过max_size就提前截断；另外地，也检查writer的一些flag，与leaer不
-  //一致也提前截断。将符合的最后的一个write记录到WriteGroup::last_write中。
+/** comment by hy 2020-06-28
+ * # 从leader所在的Write开始遍历，直至newestwrite
+ */
   Writer* w = leader;
   while (w != newest_writer) {
     w = w->link_newer;
 
+/** comment by hy 2020-06-28
+ * # 检查writer的一些flag 与leaer不一致也提前截断
+ */
     if (w->sync && !leader->sync) {
       // Do not include a sync write into a batch handled by a non-sync write.
       break;
@@ -536,13 +572,17 @@ size_t WriteThread::EnterAsBatchGroupLeader(Writer* leader,
       // dont batch writes that don't want to be batched
       break;
     }
-
+/** comment by hy 2020-06-28
+ * # 累加每个writer的size，超过max_size就提前截断
+ */
     auto batch_size = WriteBatchInternal::ByteSize(w->batch);
     if (size + batch_size > max_size) {
       // Do not make batch too big
       break;
     }
-
+/** comment by hy 2020-06-28
+ * # 获取该leader及其下面所有follower的Writer对应的WriteBatch数据总长度
+ */
     w->write_group = write_group;
     size += batch_size;
     write_group->last_writer = w;
@@ -656,12 +696,20 @@ void WriteThread::LaunchParallelMemTableWriters(WriteGroup* write_group) {
 }
 
 static WriteThread::AdaptationContext cpmtw_ctx("CompleteParallelMemTableWriter");
+
 // This method is called by both the leader and parallel followers
-//待所有的线程（不管leader线程或者follower线程）写完memtable，都会调用
-//CompleteParallelMemTableWriter判断自己是否是最后一个完成写memtable的线程，
-//如果不是最后一个则等待被通知；如果是最后一个是follower线程，通过调用
-//ExitAsBatchGroupFollower函数，调用ExitAsBatchGroupLeader通知所有follower可以退出，
-//并且通知leader线程。如果最后一个完成的是leader线程，则可以直接调用ExitAsBatchGroupLeader函数。
+/*****************************************************************************
+ * 函 数 名  : rocksdb.WriteThread.CompleteParallelMemTableWriter
+ * 负 责 人  : hy
+ * 创建日期  : 2020年6月28日
+ * 函数功能  : 判断自己是否是最后一个完成写memtable的线程
+ * 输入参数  : Writer* w   
+ * 输出参数  : 无
+ * 返 回 值  : bool
+ * 调用关系  : 
+ * 其    它  : 
+
+*****************************************************************************/
 bool WriteThread::CompleteParallelMemTableWriter(Writer* w) {
 
   auto* write_group = w->write_group;
@@ -670,6 +718,9 @@ bool WriteThread::CompleteParallelMemTableWriter(Writer* w) {
     write_group->status = w->status;
   }
 
+/** comment by hy 2020-06-28
+ * # 如果不是最后一个则等待被通知
+ */
   if (write_group->running-- > 1) {
     // we're not the last one
     AwaitState(w, STATE_COMPLETED, &cpmtw_ctx);
@@ -686,28 +737,22 @@ void WriteThread::ExitAsBatchGroupFollower(Writer* w) {
 
   assert(w->state == STATE_PARALLEL_MEMTABLE_WRITER);
   assert(write_group->status.ok());
+/** comment by hy 2020-06-28
+ * # 如果最后一个完成的是leader线程
+     则可以直接调用ExitAsBatchGroupLeader函数。
+ */
   ExitAsBatchGroupLeader(*write_group, write_group->status);
   assert(w->status.ok());
   assert(w->state == STATE_COMPLETED);
+/** comment by hy 2020-06-28
+ * # 如果是最后一个是调用ExitAsBatchGroupLeader通知所有follower退出，
+     并且通知leader线程
+ */
   SetState(write_group->leader, STATE_COMPLETED);
 }
 
 static WriteThread::AdaptationContext eabgl_ctx("ExitAsBatchGroupLeader");
-//CompleteParallelMemTableWriter判断自己是否是最后一个完成写memtable的线程，
-//如果不是最后一个则等待被通知；如果是最后一个是follower线程，通过调用
-//ExitAsBatchGroupFollower函数，调用ExitAsBatchGroupLeader通知所有follower可以退出，
-//并且通知leader线程。如果最后一个完成的是leader线程，则可以直接调用ExitAsBatchGroupLeader函数。
 
-
-//当当前的leader将它自己与它的follow写入之后，此时它将需要写入memtable,那么此时之前
-//还阻塞的Writer，分为两种情况 第一种是已经被当前的leader打包写入到WAL，这些writer
-//(包括leader自己)需要将他们链接到memtable writer list.还有一种情况，那就是还没有写入WAL的，
-//此时这类writer则需要选择一个leader然后继续写入WAL.
-
-//ExitAsBatchGroupLeader函数除了通知follower线程提交已经完成，还有另一个作用。
-//在这一轮Group Commit进行过程中，writer链表可能新添加了许多待提交的事务。
-//当退出本次Group Commit之前，如果writer链表上有新的待提交的事务，将它设置成leader。
-//这个成为leader的线程将被唤醒，重复leader线程进行Group Commit的逻辑。
 void WriteThread::ExitAsBatchGroupLeader(WriteGroup& write_group,
                                          Status status) {
   Writer* leader = write_group.leader;
@@ -748,8 +793,11 @@ void WriteThread::ExitAsBatchGroupLeader(WriteGroup& write_group,
     // so we know the boundary of the current write group.
 /** comment by hy 2020-06-13
  * # 选出下一个batch的leader
+      这一轮Group Commit进行过程中，writer链表可能新添加了许多待提交的事务
+     当退出本次Group Commit之前，
+     如果writer链表上有新的待提交的事务，将它设置成leader
      首先判断等待队列中是否有新来的writer,
-     假如没有，则插入一个dummy(空)的write至
+     假如没有，则插入一个dummy(空)的writer
  */
     Writer dummy;
     Writer* expected = last_writer;
@@ -866,12 +914,18 @@ static WriteThread::AdaptationContext eu_ctx("EnterUnbatched");
 void WriteThread::EnterUnbatched(Writer* w, InstrumentedMutex* mu) {
   assert(w != nullptr && w->batch == nullptr);
   mu->Unlock();
+/** comment by hy 2020-06-29
+ * # 更新 leader
+ */
   bool linked_as_leader = LinkOne(w, &newest_writer_);
   if (!linked_as_leader) {
     TEST_SYNC_POINT("WriteThread::EnterUnbatched:Wait");
     // Last leader will not pick us as a follower since our batch is nullptr
     AwaitState(w, STATE_GROUP_LEADER, &eu_ctx);
   }
+/** comment by hy 2020-06-29
+ * # 管道写
+ */
   if (enable_pipelined_write_) {
     WaitForMemTableWriters();
   }

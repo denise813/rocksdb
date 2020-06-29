@@ -51,7 +51,9 @@ struct ImmutableDBOptions {
   bool allow_fallocate;
   bool is_fd_close_on_exec;
   bool advise_random_on_open;
-  //db_write_buffer_size 总的memtable的大小限制(所有的ColumnFamily).
+/** comment by hy 2020-06-29
+ * # 总的memtable的大小限制(所有的ColumnFamily)
+ */
   size_t db_write_buffer_size;
   std::shared_ptr<WriteBufferManager> write_buffer_manager;
   DBOptions::AccessHint access_hint_on_compaction_start;
@@ -61,7 +63,9 @@ struct ImmutableDBOptions {
   std::vector<std::shared_ptr<EventListener>> listeners;
   bool enable_thread_tracking;
   bool enable_pipelined_write;
-  //开启后可以并发写memtable  可以参考http://kernelmaker.github.io/Rocksdb_Study_3 这里有测试结果
+/** comment by hy 2020-06-29
+ * # 开启后可以并发写memtable
+ */
   bool allow_concurrent_memtable_write;
   bool enable_write_thread_adaptive_yield;
   uint64_t write_thread_max_yield_usec;

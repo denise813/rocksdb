@@ -639,8 +639,12 @@ class RandomAccessFile {
 // must provide buffering since callers may append small fragments
 // at a time to the file.
 
-//虚基类WritableFile、SequentialFile、RandomAccessFile，分别是文件的写抽象类，顺序读抽象类和随机读抽象类
-//PosixEnv类中包含这几个类的new接口   PosixWritableFile继承该类
+/** comment by hy 2020-06-29
+ * # WritableFile 文件的写抽象类
+     SequentialFile 顺序读抽象类
+     RandomAccessFile 随机读抽象类
+     PosixEnv类中包含这几个类的new接口   PosixWritableFile继承该类
+ */
 class WritableFile {
  public:
   WritableFile()

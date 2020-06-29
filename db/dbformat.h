@@ -32,14 +32,16 @@ class InternalKey;
 // data structures.
 // The highest bit of the value type needs to be reserved to SST tables
 // for them to do more flexible encoding.
-/*
-插入数据时：type（kTypeValue、kTypeDeletion），Key_size，Key，Value_size，Value
-删除数据时：type（kTypeValue、kTypeDeletion），Key_size，Key
-*/
-//参考ReadRecordFromWriteBatch
+/** comment by hy 2020-06-28
+ * # 插入数据时：type（kTypeValue、kTypeDeletion），Key_size，Key，Value_size，Value
+     删除数据时：type（kTypeValue、kTypeDeletion），Key_size，Key
+     参考ReadRecordFromWriteBatch
+ */
 enum ValueType : unsigned char {
   kTypeDeletion = 0x0,
-  //value就表示是插入
+/** comment by hy 2020-06-27
+ * # value就表示是插入
+ */
   kTypeValue = 0x1,
   kTypeMerge = 0x2,
   kTypeLogData = 0x3,               // WAL only.
@@ -91,46 +93,68 @@ static const SequenceNumber kMaxSequenceNumber = ((0x1ull << 56) - 1);
 
 static const SequenceNumber kDisableGlobalSequenceNumber = port::kMaxUint64;
 
-//键值比较
-// 内存数据库中所有的数据项都是按照键值比较规则进行排序的。这个比较规则可以由用户自己定制，也可以
-// 使用系统默认的。在这里介绍一下系统默认的比较规则。
+/** comment by hy 2020-06-28
+ * # 键值比较
+     内存数据库中所有的数据项都是按照键值比较规则进行排序的。
+     这个比较规则可以由用户自己定制，也可以使用系统默认的。
+     在这里介绍一下系统默认的比较规则。
 
-//默认的比较规则：
-// 首先按照字典序比较用户定义的key（ukey），若用户定义key值大，整个internalKey就大；
-// 若用户定义的key相同，则序列号大的internalKey值就小；
-// 通过这样的比较规则，则所有的数据项首先按照用户key进行升序排列；当用户key一致时，按照序列号进行降序排列，
-// 这样可以保证首先读到序列号大的数据项。
+     默认的比较规则：
+    首先按照字典序比较用户定义的key（ukey）
+    若用户定义key值大，整个internalKey就大；
+    若用户定义的key相同，则序列号大的internalKey值就小；
+    通过这样的比较规则，则所有的数据项首先按照用户key进行升序排列；
+      当用户key一致时，按照序列号进行降序排列，
+      这样可以保证首先读到序列号大的数据项。
 
-//InternalKey和ParsedInternalKey区别?
-//1. InternalKey（class InternalKey）是一个复合概念，是有几个部分组合成的一个key，
-//  ParsedInternalKey（struct ParsedInternalKey）就是对InternalKey分拆后的结果
-//2. InternalKey 是一个只存储了一个string，它使用一个 DecodeFrom() 函数将Slice类型的InternalKey
-//  解码出string类型的InternalKey. 也就是说InternalKey是由User_key.data + SequenceNumber + ValueType
-//  组合而成的，顺便先分析下几个Key相关的函数，它们是了解Internal Key和User Key的关键。
-//3. InternalKey和ParsedInternalKey相互转换的两个函数，如下。
-//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
-//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
+    InternalKey和ParsedInternalKey区别?
+    1. InternalKey（class InternalKey）是一个复合概念，
+       是有几个部分组合成的一个key，
+    ParsedInternalKey（struct ParsedInternalKey）
+       就是对InternalKey分拆后的结果
+    2. InternalKey 是一个只存储了一个string，
+       它使用一个 DecodeFrom() 函数将Slice类型的InternalKey
+    解码出string类型的InternalKey.
+    也就是说InternalKey是由User_key.data + SequenceNumber + ValueType
+    组合而成的，顺便先分析下几个Key相关的函数，
+    它们是了解Internal Key和User Key的关键。
+    3. InternalKey和ParsedInternalKey相互转换的两个函数，如下。
+      Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
+      AppendInternalKey() 将key（ParsedInternalKey）
+      序列化为result（Internel key）
 
-//注意LookupKey和ParsedInternalKey对应比较
-//解码获取成员值见ParseInternalKey
+    注意LookupKey和ParsedInternalKey对应比较
+    解码获取成员值见ParseInternalKey
+ */
 struct ParsedInternalKey {
+/** comment by hy 2020-06-28
+ * # 
   //用户定义的key：这个key值也就是原生的key值；
+ */
   Slice user_key;
-  //快照seq可以参考https://leveldb-handbook.readthedocs.io/zh/latest/rwopt.html#id8
-  //internalKey的seq字段使用的便是快照对应的seq
-  //序列号：rocksdb中，每一次写操作都有一个sequence number，标志着写入操作的先后顺序。
-  //由于在rocksdb中，可能会有多条相同key的数据项同时存储在数据库中，因此需要有一个序列
-  //号来标识这些数据项的新旧情况。序列号最大的数据项为最新值；
-  //同时sequence number是实现事务处理的关键，同时也是MVCC的基础。
+/** comment by hy 2020-06-28
+ * # 快照seq可以参考https://leveldb-handbook.readthedocs.io/zh/latest/rwopt.html#id8
+     internalKey的seq字段使用的便是快照对应的seq
+     序列号：rocksdb中，每一次写操作都有一个sequence number，
+     标志着写入操作的先后顺序。
+     由于在rocksdb中，可能会有多条相同key的数据项同时存储在数据库中，
+     因此需要有一个序列号来标识这些数据项的新旧情况。
+     序列号最大的数据项为最新值；
+     同时sequence number是实现事务处理的关键，同时也是MVCC的基础。
+ */
   SequenceNumber sequence;
-  //类型：标志本条数据项的类型，为更新还是删除；
-  //取值见enum ValueType {}   kTypeDeletion  kTypeValue kTypeMerge 
+/** comment by hy 2020-06-28
+ * # 类型：标志本条数据项的类型，为更新还是删除；
+     取值见enum ValueType {}   kTypeDeletion  kTypeValue kTypeMerge
+ */
   ValueType type;
 
   ParsedInternalKey()
       : sequence(kMaxSequenceNumber)  // Make code analyzer happy
   {}  // Intentionally left uninitialized (for speed)
-  //InternalKey解码
+/** comment by hy 2020-06-28
+ * # InternalKey解码
+ */
   ParsedInternalKey(const Slice& u, const SequenceNumber& seq, ValueType t)
       : user_key(u), sequence(seq), type(t) {}
   std::string DebugString(bool hex = false) const;
@@ -200,7 +224,9 @@ class InternalKeyComparator
 #endif
     : public Comparator {
  private:
-  //用于user key的比较
+/** comment by hy 2020-06-28
+ * # 用于user key的比较
+ */
   UserComparatorWrapper user_comparator_;
   std::string name_;
 
@@ -233,26 +259,37 @@ class InternalKeyComparator
 // Modules in this directory should keep internal keys wrapped inside
 // the following class instead of plain strings so that we do not
 // incorrectly use string comparisons instead of an InternalKeyComparator.
-//键值比较
-// 内存数据库中所有的数据项都是按照键值比较规则进行排序的。这个比较规则可以由用户自己定制，也可以
-// 使用系统默认的。在这里介绍一下系统默认的比较规则。
+/** comment by hy 2020-06-28
+ * # 键值比较
+     内存数据库中所有的数据项都是按照键值比较规则进行排序的。
+     这个比较规则可以由用户自己定制，也可以
+     使用系统默认的。在这里介绍一下系统默认的比较规则。
+     默认的比较规则：
+     首先按照字典序比较用户定义的key（ukey）
+     若用户定义key值大，整个internalKey就大；
+     若用户定义的key相同，则序列号大的internalKey值就小；
+     通过这样的比较规则，则所有的数据项首先按照用户key进行升序排列；
+     当用户key一致时，按照序列号进行降序排列，
+     这样可以保证首先读到序列号大的数据项。
 
-//默认的比较规则：
-// 首先按照字典序比较用户定义的key（ukey），若用户定义key值大，整个internalKey就大；
-// 若用户定义的key相同，则序列号大的internalKey值就小；
-// 通过这样的比较规则，则所有的数据项首先按照用户key进行升序排列；当用户key一致时，按照序列号进行降序排列，
-// 这样可以保证首先读到序列号大的数据项。
-
-
-//InternalKey和ParsedInternalKey区别?
-//1. InternalKey（class InternalKey）是一个复合概念，是有几个部分组合成的一个key，
-//  ParsedInternalKey（struct ParsedInternalKey）就是对InternalKey分拆后的结果
-//2. InternalKey 是一个只存储了一个string，它使用一个 DecodeFrom() 函数将Slice类型的InternalKey
-//  解码出string类型的InternalKey. 也就是说InternalKey是由User_key.data + SequenceNumber + ValueType
-//  组合而成的，顺便先分析下几个Key相关的函数，它们是了解Internal Key和User Key的关键。
-//3. InternalKey和ParsedInternalKey相互转换的两个函数，如下。
-//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
-//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
+     InternalKey和ParsedInternalKey区别?
+     1. InternalKey（class InternalKey）是一个复合概念，
+        是有几个部分组合成的一个key，
+     ParsedInternalKey（struct ParsedInternalKey）
+        就是对InternalKey分拆后的结果
+     2. InternalKey 是一个只存储了一个string，
+        它使用一个 DecodeFrom() 函数将Slice类型的InternalKey
+        解码出string类型的InternalKey.
+        也就是说InternalKey是由
+        User_key.data + SequenceNumber + ValueType
+       组合而成的，顺便先分析下几个Key相关的函数，
+       它们是了解Internal Key和User Key的关键。
+     3. InternalKey和ParsedInternalKey相互转换的两个函数，如下。
+       Inline bool ParseInternalKey()
+       将internal_key（Slice）解析出来为result
+       AppendInternalKey() 将key（ParsedInternalKey）
+       序列化为result（Internel key）
+ */
 class InternalKey {
  private:
   std::string rep_;
@@ -320,10 +357,13 @@ inline int InternalKeyComparator::Compare(const InternalKey& a,
   return Compare(a.Encode(), b.Encode());
 }
 
-//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
-//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
-
-//Internal key的解码 将编码后的internal_key解码为* result。
+/** comment by hy 2020-06-28
+  * # Inline bool ParseInternalKey()
+      将internal_key（Slice）解析出来为result
+  * # AppendInternalKey()
+      将key（ParsedInternalKey）序列化为result（Internel key）
+  * # Internal key的解码 将编码后的internal_key解码为* result。
+  */
 inline bool ParseInternalKey(const Slice& internal_key,
                              ParsedInternalKey* result) {
   const size_t n = internal_key.size();

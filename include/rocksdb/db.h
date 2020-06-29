@@ -127,8 +127,10 @@ typedef std::unordered_map<std::string, std::shared_ptr<const TableProperties>>
 // A DB is safe for concurrent access from multiple threads without
 // any external synchronization.
 
-//DBImpl 继承该类
-//rocksdb_open中构造使用，存储在rocksdb_t.rep成员中，真正赋值建DBImpl::Open
+/** comment by hy 2020-06-27
+ * # DBImpl 继承该类
+     rocksdb_open中构造使用，存储在rocksdb_t.rep成员中，真正赋值建DBImpl::Open
+*/
 class DB {
  public:
   // Open the database with the specified "name".
@@ -299,8 +301,7 @@ class DB {
   // Set the database entry for "key" to "value".
   // If "key" already exists, it will be overwritten.
   // Returns OK on success, and a non-OK status on error.
-  // Note: consider setting options.sync = true.
-  // 设置db项{key, value}  
+  // Note: consider setting options.sync = true. 
   virtual Status Put(const WriteOptions& options,
                      ColumnFamilyHandle* column_family, const Slice& key,
                      const Slice& value) = 0;
@@ -376,7 +377,6 @@ class DB {
   // options.sync=true.
   // Returns OK on success, non-OK on failure.
   // Note: consider setting options.sync = true.
-  // 更新操作
   virtual Status Write(const WriteOptions& options, WriteBatch* updates) = 0;
 
   // If the database contains an entry for "key" store the
@@ -457,9 +457,10 @@ class DB {
   //
   // Caller should delete the iterator when it is no longer needed.
   // The returned iterator should be deleted before this db is deleted.
-  
-  // 返回heap分配的iterator，访问db的内容，返回的iterator的位置是invalid的  
-  // 在使用之前，调用者必须先调用Seek。  
+/** comment by hy 2020-06-27
+ * # 返回heap分配的iterator，访问db的内容，返回的iterator的位置是invalid的
+     在使用之前，调用者必须先调用Seek
+ */
   virtual Iterator* NewIterator(const ReadOptions& options,
                                 ColumnFamilyHandle* column_family) = 0;
   virtual Iterator* NewIterator(const ReadOptions& options) {
@@ -480,14 +481,16 @@ class DB {
   //
   // nullptr will be returned if the DB fails to take a snapshot or does
   // not support snapshot.
-  
-  // 返回当前db状态的handle，和handle一起创建的Iterator看到的都是  
-  // 当前db状态的稳定快照。不再使用时，应该调用ReleaseSnapshot(result)  
+/** comment by hy 2020-06-27
+ * # 返回当前db状态的handle，和handle一起创建的Iterator看到的都是
+     当前db状态的稳定快照。不再使用时，应该调用ReleaseSnapshot(result)
+ */
   virtual const Snapshot* GetSnapshot() = 0;
-
-  // Release a previously acquired snapshot.  The caller must not
-  // use "snapshot" after this call.
-  // 释放获取的db快照  
+/** comment by hy 2020-06-27
+ * # Release a previously acquired snapshot.  The caller must not
+     use "snapshot" after this call.
+     释放获取的db快照
+ */
   virtual void ReleaseSnapshot(const Snapshot* snapshot) = 0;
 
 #ifndef ROCKSDB_LITE

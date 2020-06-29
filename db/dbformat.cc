@@ -30,23 +30,27 @@ namespace rocksdb {
 const ValueType kValueTypeForSeek = kTypeBlobIndex;
 const ValueType kValueTypeForSeekForPrev = kTypeDeletion;
 
-/*
-先将seq左移8位，然后和t进行或操作，相当于把t放到了seq的低8为。为什么seq要小于等于kMaxSequenceNumber呢。
+/** comment by hy 2020-06-27
+ * # 先将seq左移8位，然后和t进行或操作，相当于把t放到了seq的低8为。
+     为什么seq要小于等于kMaxSequenceNumber呢。
+     因为kMaxSequenceNumber的值如下所示。
+      typedef uint64_t SequenceNumber;
+      We leave eight bits empty at the bottom so a type and sequence#
+      can be packed together into 64-bits.
+      0x1ull:u-unsigned 无符号；l-long 长整型，ll就是64位整型。
+      整个0x1ull代表的含义是无符号64位整型常量1，用16进制表示。
+      static const SequenceNumber kMaxSequenceNumber = ((0x1ull << 56) - 1);
 
-因为kMaxSequenceNumber的值如下所示。
-typedef uint64_t SequenceNumber;
-
-// We leave eight bits empty at the bottom so a type and sequence#
-// can be packed together into 64-bits.
-//0x1ull:u-unsigned 无符号；l-long 长整型，ll就是64位整型。整个0x1ull代表的含义是无符号64位整型常量1，用16进制表示。
-static const SequenceNumber kMaxSequenceNumber = ((0x1ull << 56) - 1);
-
-用二进制表示就是：0000 0000 1111 1111 1111 1111 1111 1111。如果seq大于kMaxSequenceNumber，左移8位的话会移出界。
+      用二进制表示就是：0000 0000 1111 1111 1111 1111 1111 1111。
+      如果seq大于kMaxSequenceNumber，左移8位的话会移出界。
 */
 uint64_t PackSequenceAndType(uint64_t seq, ValueType t) {
   assert(seq <= kMaxSequenceNumber);
   assert(IsExtendedValueType(t));
-  return (seq << 8) | t; //低8位为type,其他的为seq
+/** comment by hy 2020-06-27
+ * # 低8位为type,其他的为seq
+ */
+  return (seq << 8) | t;
 }
 
 EntryType GetEntryType(ValueType value_type) {
@@ -87,10 +91,13 @@ void UnPackSequenceAndType(uint64_t packed, uint64_t* seq, ValueType* t) {
   assert(IsExtendedValueType(*t));
 }
 
-//  Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
-//  AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
-
-//AppendInternalKey函数先把user_key添加到*result中，然后用PackSequenceAndType函数将sequence和type打包，并将打包的结果添加到*result中。
+/** comment by hy 2020-06-27
+ * # Inline bool ParseInternalKey()将internal_key（Slice）解析出来为result
+     AppendInternalKey() 将key（ParsedInternalKey）序列化为result（Internel key）
+     AppendInternalKey函数先把user_key添加到*result中
+     然后用PackSequenceAndType函数将sequence和type打包
+     并将打包的结果添加到*result中
+ */
 void AppendInternalKey(std::string* result, const ParsedInternalKey& key) {
   result->append(key.user_key.data(), key.user_key.size());
   PutFixed64(result, PackSequenceAndType(key.sequence, key.type));
@@ -124,18 +131,25 @@ std::string InternalKey::DebugString(bool hex) const {
 }
 
 const char* InternalKeyComparator::Name() const { return name_.c_str(); }
-/*
-在RocksDB内部是如何组织的。在RocksDB中的不同版本的key是按照下面的逻辑进行排序:
-increasing user key (according to user-supplied comparator)
-decreasing sequence number
-decreasing type (though sequence# should be enough to disambiguate)
-*/
-/*
-1）首先比较user_key，如果user_key不相同，就直接返回比较结果，否则继续进行第二步。user_comparator_是用户指定的比较器，在InternalKeyComparator构造时传入。
-2）在user_key相同的情况下，比较sequence_numer|value type然后返回结果(注意每个Internal Key的sequence_number是唯一的，因此不可能出现anum==bnum的情况)
-*/
-//查找的地方见FindGreaterOrEqual 
-//InternalKeyComparator::Compare和InlineSkipList<>::FindGreaterOrEqual配合阅读
+/** comment by hy 2020-06-27
+ * # 在RocksDB内部是如何组织的。
+     在RocksDB中的不同版本的key是按照下面的逻辑进行排序:
+     increasing user key (according to user-supplied comparator)
+     decreasing sequence number
+     decreasing type (though sequence# should be enough to disambiguate)
+
+     1）首先比较user_key，如果user_key不相同，就直接返回比较结果，
+        否则继续进行第二步。
+        user_comparator_是用户指定的比较器，在InternalKeyComparator构造时传入。
+     2）在user_key相同的情况下，
+        比较sequence_numer|value type然后返回结果
+        (注意每个Internal Key的sequence_number是唯一的，
+         因此不可能出现anum==bnum的情况)
+
+    查找的地方见FindGreaterOrEqual 
+    InternalKeyComparator::Compare和
+    InlineSkipList<>::FindGreaterOrEqual配合阅读
+ */
 int InternalKeyComparator::Compare(const ParsedInternalKey& a,
                                    const ParsedInternalKey& b) const {
   // Order by:
@@ -143,8 +157,10 @@ int InternalKeyComparator::Compare(const ParsedInternalKey& a,
   //    decreasing sequence number
   //    decreasing type (though sequence# should be enough to disambiguate)
   int r = user_comparator_.Compare(a.user_key, b.user_key);
-  //user key相同，比较sequence和type
-  //当Key相同时，按照seq的降序，如果seq相同则按照type的降序
+/** comment by hy 2020-06-27
+ * # user key相同，比较sequence和type
+     当Key相同时，按照seq的降序，如果seq相同则按照type的降序
+ */
   if (r == 0) {
     if (a.sequence > b.sequence) {
       r = -1;
@@ -159,11 +175,13 @@ int InternalKeyComparator::Compare(const ParsedInternalKey& a,
   return r;
 }
 
-/*
-1）该函数取出Internal Key中的user_key字段，根据用户指定的comparator找到短字符串并替换user_start。
-此时user_start物理上是变短了，但是逻辑上却变大了，详见BytewiseComparatorImpl
-
-2）如果user_start被替换了，就用新的user_start更新Internal Key，并使用最大的sequence number。否则start保持不变。
+/** comment by hy 2020-06-27
+   * # 该函数取出Internal Key中的user_key字段，
+       根据用户指定的comparator找到短字符串并替换user_start。
+     # 此时user_start物理上是变短了，但是逻辑上却变大了，
+       详见BytewiseComparatorImpl
+     # 如果user_start被替换了，就用新的user_start更新Internal Key，
+       并使用最大的sequence number。否则start保持不变。
 */
 void InternalKeyComparator::FindShortestSeparator(std::string* start,
                                                   const Slice& limit) const {
@@ -174,8 +192,9 @@ void InternalKeyComparator::FindShortestSeparator(std::string* start,
   user_comparator_.FindShortestSeparator(&tmp, user_limit);
   if (tmp.size() <= user_start.size() &&
       user_comparator_.Compare(user_start, tmp) < 0) {
-		// if user key在物理上长度变短了，但其逻辑值变大了.生产新的*start时，	
-		// 使用最大的sequence number，以保证排在相同user key记录序列的第一个	
+/** comment by hy 2020-06-27
+ * # 使用最大的sequence number，以保证排在相同user key记录序列的第一个
+ */
     // User key has become shorter physically, but larger logically.
     // Tack on the earliest possible number to the shortened user key.
     PutFixed64(&tmp,
@@ -214,11 +233,15 @@ LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s) {
   start_ = dst;
   // NOTE: We don't support users keys of more than 2GB :)
   dst = EncodeVarint32(dst, static_cast<uint32_t>(usize + 8));
-  //kstart_指向_user_key数据部分
+/** comment by hy 2020-06-27
+ * # kstart_指向_user_key数据部分
+ */
   kstart_ = dst;
   memcpy(dst, _user_key.data(), usize);
   dst += usize;
-  //紧跟后面的是SequenceNumber+type，type用kValueTypeForSeek
+/** comment by hy 2020-06-27
+ * # 紧跟后面的是SequenceNumber+type，type用kValueTypeForSeek
+ */
   EncodeFixed64(dst, PackSequenceAndType(s, kValueTypeForSeek));
   dst += 8;
   end_ = dst;

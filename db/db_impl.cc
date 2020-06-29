@@ -1051,7 +1051,7 @@ Status DBImpl::FlushWAL(bool sync) {
   return SyncWAL();
 }
 
-//真正的flush刷盘 DBImpl::SyncWAL
+
 Status DBImpl::SyncWAL() {
   autovector<log::Writer*, 1> logs_to_sync;
   bool need_log_dir_sync;
